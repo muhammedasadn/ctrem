@@ -42,6 +42,7 @@ add_executable(cterm
     src/pty.c        # PTY open, read, write, resize, destroy
     src/ansi.c       # ANSI/VT100 parser + terminal cell grid
     src/tabs.c       # Tab bar + TabManager
+    src/pane.c       # Split pane tree (recursive binary tree)
 )
 
 # ── Link libraries ────────────────────────────────────────────
