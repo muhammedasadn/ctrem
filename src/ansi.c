@@ -1,111 +1,161 @@
+/*
+ * ansi.c — ANSI/VT100 terminal emulator implementation.
+ *
+ * This file implements:
+ *   - Terminal grid allocation and destruction
+ *   - The 3-state ANSI escape sequence parser
+ *   - SGR (color + bold) handling
+ *   - Cursor movement commands
+ *   - Screen and line erase commands
+ *   - Scrollback ring buffer (push, get, display row)
+ *   - Terminal resize
+ *
+ * The public API is declared in ansi.h.
+ * Include ansi.h — do not include this file directly.
+ */
+
+#define _GNU_SOURCE
+
 #include "ansi.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Default colors: light gray on black */
+
+/* ── Default colors ─────────────────────────────────────────── */
+
 static const Color DEFAULT_FG = {200, 200, 200};
 static const Color DEFAULT_BG = {  0,   0,   0};
 
-/*
- * terminal_create — allocates the cell grid on the heap.
- *
- * We use malloc() to allocate memory dynamically because
- * the grid size isn't known at compile time — it depends
- * on window size and font size chosen at runtime.
- *
- * malloc(n) returns a pointer to n bytes of uninitialized memory.
- * calloc(n, size) returns n*size bytes all zeroed — safer for grids.
- */
+
+/* ── terminal_create ────────────────────────────────────────── */
+
 Terminal *terminal_create(int cols, int rows) {
     Terminal *t = calloc(1, sizeof(Terminal));
-    if (!t) return NULL;
+    if (!t) {
+        fprintf(stderr, "terminal_create: out of memory\n");
+        return NULL;
+    }
 
-    t->cols = cols;
-    t->rows = rows;
-    t->current_fg = DEFAULT_FG;
-    t->current_bg = DEFAULT_BG;
-    t->state = STATE_NORMAL;
+    t->cols          = cols;
+    t->rows          = rows;
+    t->current_fg    = DEFAULT_FG;
+    t->current_bg    = DEFAULT_BG;
+    t->state         = STATE_NORMAL;
+    t->scroll_offset = 0;
+    t->sb_head       = 0;
+    t->sb_count      = 0;
 
-    /*
-     * Allocate the 2D cell grid.
-     * We allocate an array of ROW pointers, then for each
-     * row we allocate an array of COLS Cell structs.
-     *
-     * Memory layout:
-     *   t->cells        → [ptr row0] [ptr row1] [ptr row2] ...
-     *   t->cells[0]     → [Cell][Cell][Cell]...  (cols cells)
-     *   t->cells[1]     → [Cell][Cell][Cell]...
-     */
     t->cells = calloc(rows, sizeof(Cell *));
     if (!t->cells) { free(t); return NULL; }
 
     for (int r = 0; r < rows; r++) {
         t->cells[r] = calloc(cols, sizeof(Cell));
         if (!t->cells[r]) { terminal_destroy(t); return NULL; }
-
-        /* Initialize every cell with space + default colors */
         for (int c = 0; c < cols; c++) {
-            t->cells[r][c].ch = ' ';
-            t->cells[r][c].fg = DEFAULT_FG;
-            t->cells[r][c].bg = DEFAULT_BG;
+            t->cells[r][c].ch    = ' ';
+            t->cells[r][c].fg    = DEFAULT_FG;
+            t->cells[r][c].bg    = DEFAULT_BG;
+            t->cells[r][c].bold  = 0;
+            t->cells[r][c].dirty = 1;
         }
     }
 
     return t;
 }
 
-/*
- * terminal_destroy — free every allocation in reverse order.
- * In C, you must manually free everything you malloc.
- * Forgetting this causes memory leaks.
- */
+
+/* ── terminal_destroy ───────────────────────────────────────── */
+
 void terminal_destroy(Terminal *t) {
     if (!t) return;
+
     if (t->cells) {
-        for (int r = 0; r < t->rows; r++) {
-            free(t->cells[r]);   /* free each row array */
-        }
-        free(t->cells);          /* free the pointer array */
+        for (int r = 0; r < t->rows; r++)
+            free(t->cells[r]);
+        free(t->cells);
     }
-    free(t);                     /* free the Terminal struct itself */
+
+    for (int i = 0; i < SCROLLBACK_MAX; i++) {
+        if (t->scrollback[i].cells)
+            free(t->scrollback[i].cells);
+    }
+
+    free(t);
 }
 
-/* ── Internal helpers ────────────────────────────────────────── */
 
-/*
- * scroll_up — shifts all rows up by one, clears the bottom row.
- * Called when the cursor moves past the last row.
- * memmove handles overlapping memory safely (unlike memcpy).
- */
-static void scroll_up(Terminal *t) {
-    /* Save pointer to row 0 — we'll reuse it as the new last row */
-    Cell *top_row = t->cells[0];
+/* ── Internal helpers ───────────────────────────────────────── */
 
-    /* Shift all row pointers up by one position */
-    memmove(&t->cells[0], &t->cells[1], (t->rows - 1) * sizeof(Cell *));
-
-    /* Put the old top row at the bottom and clear it */
-    t->cells[t->rows - 1] = top_row;
-    for (int c = 0; c < t->cols; c++) {
-        t->cells[t->rows - 1][c].ch    = ' ';
-        t->cells[t->rows - 1][c].fg    = DEFAULT_FG;
-        t->cells[t->rows - 1][c].bg    = DEFAULT_BG;
-        t->cells[t->rows - 1][c].dirty = 1;
-    }
-}
-
-/* Mark every cell dirty so it gets redrawn */
 static void mark_all_dirty(Terminal *t) {
     for (int r = 0; r < t->rows; r++)
         for (int c = 0; c < t->cols; c++)
             t->cells[r][c].dirty = 1;
 }
 
-/* Put a character at current cursor position and advance */
+/*
+ * scrollback_push — save a copy of one row into the ring buffer.
+ *
+ * Called every time a line scrolls off the top of the visible
+ * screen. We deep-copy the Cell array so colors are preserved.
+ *
+ * Ring buffer:
+ *   sb_head  → next slot to write (wraps at SCROLLBACK_MAX)
+ *   sb_count → total lines stored (capped at SCROLLBACK_MAX)
+ */
+static void scrollback_push(Terminal *t, Cell *row) {
+    ScrollbackLine *slot = &t->scrollback[t->sb_head];
+
+    if (slot->cells) {
+        free(slot->cells);
+        slot->cells = NULL;
+    }
+
+    slot->cells = malloc(t->cols * sizeof(Cell));
+    if (!slot->cells) return;
+
+    memcpy(slot->cells, row, t->cols * sizeof(Cell));
+    slot->cols = t->cols;
+
+    t->sb_head = (t->sb_head + 1) % SCROLLBACK_MAX;
+    if (t->sb_count < SCROLLBACK_MAX) t->sb_count++;
+}
+
+/*
+ * scroll_up — shift all rows up by one, push top into scrollback.
+ *
+ * We rotate the row pointer array rather than copying cell data.
+ * The old top pointer is reused as the new blank bottom row.
+ */
+static void scroll_up(Terminal *t) {
+    scrollback_push(t, t->cells[0]);
+
+    Cell *top_row = t->cells[0];
+    memmove(&t->cells[0], &t->cells[1],
+            (t->rows - 1) * sizeof(Cell *));
+
+    t->cells[t->rows - 1] = top_row;
+    for (int c = 0; c < t->cols; c++) {
+        t->cells[t->rows - 1][c].ch    = ' ';
+        t->cells[t->rows - 1][c].fg    = DEFAULT_FG;
+        t->cells[t->rows - 1][c].bg    = DEFAULT_BG;
+        t->cells[t->rows - 1][c].bold  = 0;
+        t->cells[t->rows - 1][c].dirty = 1;
+    }
+
+    /* Keep the user's scrolled view stable as new lines arrive */
+    if (t->scroll_offset > 0) {
+        t->scroll_offset++;
+        if (t->scroll_offset > t->sb_count)
+            t->scroll_offset = t->sb_count;
+    }
+}
+
+/*
+ * put_char — write one character at cursor and advance it.
+ */
 static void put_char(Terminal *t, char ch) {
     if (t->cursor_col >= t->cols) {
-        /* Reached end of line — wrap to next line */
         t->cursor_col = 0;
         t->cursor_row++;
     }
@@ -124,190 +174,193 @@ static void put_char(Terminal *t, char ch) {
     t->cursor_col++;
 }
 
-/*
- * parse_params — splits "1;32;0" into integers [1, 32, 0].
- *
- * ANSI parameters are separated by semicolons.
- * We parse them into a small integer array.
- * strtol() converts a string to a long integer.
- */
+
+/* ── CSI parameter parsing ──────────────────────────────────── */
+
 static void parse_params(const char *raw, int *out, int *count) {
     *count = 0;
     const char *p = raw;
 
     while (*p && *count < MAX_PARAMS) {
-        /* strtol(str, &end, base) parses an integer.
-         * end is updated to point past the parsed number. */
         char *end;
         out[(*count)++] = (int)strtol(p, &end, 10);
-        if (*end == ';') end++;  /* skip the semicolon */
-        if (end == p) break;     /* no progress — stop */
+        if (*end == ';') end++;
+        if (end == p) break;
         p = end;
     }
 
-    /* Always have at least one param (0 = default) */
     if (*count == 0) {
         out[0] = 0;
         *count  = 1;
     }
 }
 
-/*
- * apply_sgr — handles \x1b[...m sequences.
- * SGR = Select Graphic Rendition.
- * This is how all colors and bold/italic/underline work.
- */
+
+/* ── SGR — Select Graphic Rendition ────────────────────────── */
+
 static void apply_sgr(Terminal *t, int *params, int count) {
     for (int i = 0; i < count; i++) {
         int p = params[i];
 
         if (p == 0) {
-            /* Reset everything to defaults */
             t->current_fg = DEFAULT_FG;
             t->current_bg = DEFAULT_BG;
-            t->bold = 0;
+            t->bold       = 0;
 
         } else if (p == 1) {
             t->bold = 1;
 
-        } else if (p == 2) {
-            t->bold = 0;  /* Dim / normal weight */
+        } else if (p == 2 || p == 22) {
+            t->bold = 0;
 
         } else if (p >= 30 && p <= 37) {
-            /* Standard foreground colors 30–37 */
-            int idx = p - 30;
-            if (t->bold) idx += 8;  /* Bold = bright variant */
+            int idx = (p - 30) + (t->bold ? 8 : 0);
             t->current_fg = ANSI_COLORS[idx];
 
         } else if (p == 39) {
-            /* Default foreground */
             t->current_fg = DEFAULT_FG;
 
         } else if (p >= 40 && p <= 47) {
-            /* Standard background colors 40–47 */
             t->current_bg = ANSI_COLORS[p - 40];
 
         } else if (p == 49) {
-            /* Default background */
             t->current_bg = DEFAULT_BG;
 
         } else if (p >= 90 && p <= 97) {
-            /* Bright foreground colors 90–97 */
             t->current_fg = ANSI_COLORS[(p - 90) + 8];
 
         } else if (p >= 100 && p <= 107) {
-            /* Bright background colors 100–107 */
             t->current_bg = ANSI_COLORS[(p - 100) + 8];
 
         } else if (p == 38) {
-            /*
-             * 256-color or truecolor foreground.
-             * Format: 38;5;n (256-color) or 38;2;r;g;b (truecolor)
-             */
-            if (i + 1 < count && params[i+1] == 5 && i + 2 < count) {
-                /* 256-color mode — simplified: map to nearest 16 */
-                int n = params[i+2];
-                if (n < 16) t->current_fg = ANSI_COLORS[n];
+            if (i + 2 < count && params[i + 1] == 5) {
+                int n = params[i + 2];
+                if (n >= 0 && n < 16)
+                    t->current_fg = ANSI_COLORS[n];
                 i += 2;
-            } else if (i + 1 < count && params[i+1] == 2 && i + 4 < count) {
-                /* True color RGB */
-                t->current_fg.r = params[i+2];
-                t->current_fg.g = params[i+3];
-                t->current_fg.b = params[i+4];
+            } else if (i + 4 < count && params[i + 1] == 2) {
+                t->current_fg.r = (uint8_t)params[i + 2];
+                t->current_fg.g = (uint8_t)params[i + 3];
+                t->current_fg.b = (uint8_t)params[i + 4];
                 i += 4;
             }
 
         } else if (p == 48) {
-            /* 256-color or truecolor background */
-            if (i + 1 < count && params[i+1] == 5 && i + 2 < count) {
-                int n = params[i+2];
-                if (n < 16) t->current_bg = ANSI_COLORS[n];
+            if (i + 2 < count && params[i + 1] == 5) {
+                int n = params[i + 2];
+                if (n >= 0 && n < 16)
+                    t->current_bg = ANSI_COLORS[n];
                 i += 2;
-            } else if (i + 1 < count && params[i+1] == 2 && i + 4 < count) {
-                t->current_bg.r = params[i+2];
-                t->current_bg.g = params[i+3];
-                t->current_bg.b = params[i+4];
+            } else if (i + 4 < count && params[i + 1] == 2) {
+                t->current_bg.r = (uint8_t)params[i + 2];
+                t->current_bg.g = (uint8_t)params[i + 3];
+                t->current_bg.b = (uint8_t)params[i + 4];
                 i += 4;
             }
         }
     }
 }
 
-/*
- * apply_csi — dispatches a complete CSI sequence.
- * Called when we see the final letter of an escape sequence.
- * The final letter tells us WHAT to do.
- */
+
+/* ── CSI command dispatch ───────────────────────────────────── */
+
 static void apply_csi(Terminal *t, char final) {
     int params[MAX_PARAMS];
     int count = 0;
     parse_params(t->params, params, &count);
 
-    int p0 = params[0];  /* First param, 0 if absent */
+    int p0 = params[0];
     int p1 = (count > 1) ? params[1] : 1;
+    if (p1 < 1) p1 = 1;
 
     switch (final) {
 
         case 'm':
-            /* SGR — colors and text attributes */
             apply_sgr(t, params, count);
             break;
 
-        case 'A':
-            /* Cursor up N rows */
-            t->cursor_row -= (p0 < 1 ? 1 : p0);
+        case 'A': {
+            int n = (p0 < 1) ? 1 : p0;
+            t->cursor_row -= n;
             if (t->cursor_row < 0) t->cursor_row = 0;
             break;
-
-        case 'B':
-            /* Cursor down N rows */
-            t->cursor_row += (p0 < 1 ? 1 : p0);
+        }
+        case 'B': {
+            int n = (p0 < 1) ? 1 : p0;
+            t->cursor_row += n;
             if (t->cursor_row >= t->rows) t->cursor_row = t->rows - 1;
             break;
-
-        case 'C':
-            /* Cursor right N cols */
-            t->cursor_col += (p0 < 1 ? 1 : p0);
+        }
+        case 'C': {
+            int n = (p0 < 1) ? 1 : p0;
+            t->cursor_col += n;
             if (t->cursor_col >= t->cols) t->cursor_col = t->cols - 1;
             break;
-
-        case 'D':
-            /* Cursor left N cols */
-            t->cursor_col -= (p0 < 1 ? 1 : p0);
+        }
+        case 'D': {
+            int n = (p0 < 1) ? 1 : p0;
+            t->cursor_col -= n;
             if (t->cursor_col < 0) t->cursor_col = 0;
             break;
-
-        case 'H':
-        case 'f':
-            /*
-             * Cursor position: \x1b[row;colH
-             * ANSI rows/cols are 1-based, our array is 0-based.
-             * So we subtract 1.
-             */
-            t->cursor_row = (p0 < 1 ? 1 : p0) - 1;
-            t->cursor_col = (p1 < 1 ? 1 : p1) - 1;
+        }
+        case 'E': {
+            int n = (p0 < 1) ? 1 : p0;
+            t->cursor_row += n;
+            t->cursor_col  = 0;
             if (t->cursor_row >= t->rows) t->cursor_row = t->rows - 1;
+            break;
+        }
+        case 'F': {
+            int n = (p0 < 1) ? 1 : p0;
+            t->cursor_row -= n;
+            t->cursor_col  = 0;
+            if (t->cursor_row < 0) t->cursor_row = 0;
+            break;
+        }
+        case 'G': {
+            int col = (p0 < 1) ? 1 : p0;
+            t->cursor_col = col - 1;
+            if (t->cursor_col < 0)        t->cursor_col = 0;
             if (t->cursor_col >= t->cols) t->cursor_col = t->cols - 1;
             break;
-
-        case 'J':
-            /* Erase in display */
+        }
+        case 'H':
+        case 'f': {
+            int row = (p0 < 1) ? 1 : p0;
+            int col = (p1 < 1) ? 1 : p1;
+            t->cursor_row = row - 1;
+            t->cursor_col = col - 1;
+            if (t->cursor_row < 0)        t->cursor_row = 0;
+            if (t->cursor_row >= t->rows) t->cursor_row = t->rows - 1;
+            if (t->cursor_col < 0)        t->cursor_col = 0;
+            if (t->cursor_col >= t->cols) t->cursor_col = t->cols - 1;
+            break;
+        }
+        case 'J': {
             if (p0 == 0) {
-                /* Clear from cursor to end of screen */
                 for (int c = t->cursor_col; c < t->cols; c++) {
-                    t->cells[t->cursor_row][c].ch = ' ';
+                    t->cells[t->cursor_row][c].ch    = ' ';
                     t->cells[t->cursor_row][c].dirty = 1;
                 }
                 for (int r = t->cursor_row + 1; r < t->rows; r++)
                     for (int c = 0; c < t->cols; c++) {
-                        t->cells[r][c].ch = ' ';
+                        t->cells[r][c].ch    = ' ';
                         t->cells[r][c].dirty = 1;
                     }
+            } else if (p0 == 1) {
+                for (int r = 0; r < t->cursor_row; r++)
+                    for (int c = 0; c < t->cols; c++) {
+                        t->cells[r][c].ch    = ' ';
+                        t->cells[r][c].dirty = 1;
+                    }
+                for (int c = 0; c <= t->cursor_col; c++) {
+                    t->cells[t->cursor_row][c].ch    = ' ';
+                    t->cells[t->cursor_row][c].dirty = 1;
+                }
             } else if (p0 == 2 || p0 == 3) {
-                /* Clear entire screen */
                 for (int r = 0; r < t->rows; r++)
                     for (int c = 0; c < t->cols; c++) {
-                        t->cells[r][c].ch = ' ';
+                        t->cells[r][c].ch    = ' ';
                         t->cells[r][c].dirty = 1;
                     }
                 t->cursor_row = 0;
@@ -315,47 +368,82 @@ static void apply_csi(Terminal *t, char final) {
             }
             mark_all_dirty(t);
             break;
-
-        case 'K':
-            /* Erase in line */
+        }
+        case 'K': {
             if (p0 == 0) {
-                /* Clear from cursor to end of line */
                 for (int c = t->cursor_col; c < t->cols; c++) {
-                    t->cells[t->cursor_row][c].ch = ' ';
+                    t->cells[t->cursor_row][c].ch    = ' ';
                     t->cells[t->cursor_row][c].dirty = 1;
                 }
             } else if (p0 == 1) {
-                /* Clear from start of line to cursor */
                 for (int c = 0; c <= t->cursor_col; c++) {
-                    t->cells[t->cursor_row][c].ch = ' ';
+                    t->cells[t->cursor_row][c].ch    = ' ';
                     t->cells[t->cursor_row][c].dirty = 1;
                 }
             } else if (p0 == 2) {
-                /* Clear entire line */
                 for (int c = 0; c < t->cols; c++) {
-                    t->cells[t->cursor_row][c].ch = ' ';
+                    t->cells[t->cursor_row][c].ch    = ' ';
                     t->cells[t->cursor_row][c].dirty = 1;
                 }
             }
             break;
-
-        case 'l':
+        }
+        case 'L': {
+            int n = (p0 < 1) ? 1 : p0;
+            for (int i = 0; i < n; i++) {
+                Cell *bottom = t->cells[t->rows - 1];
+                memmove(&t->cells[t->cursor_row + 1],
+                        &t->cells[t->cursor_row],
+                        (t->rows - t->cursor_row - 1) * sizeof(Cell *));
+                t->cells[t->cursor_row] = bottom;
+                for (int c = 0; c < t->cols; c++) {
+                    t->cells[t->cursor_row][c].ch    = ' ';
+                    t->cells[t->cursor_row][c].dirty = 1;
+                }
+            }
+            mark_all_dirty(t);
+            break;
+        }
+        case 'M': {
+            int n = (p0 < 1) ? 1 : p0;
+            for (int i = 0; i < n; i++) {
+                Cell *top = t->cells[t->cursor_row];
+                memmove(&t->cells[t->cursor_row],
+                        &t->cells[t->cursor_row + 1],
+                        (t->rows - t->cursor_row - 1) * sizeof(Cell *));
+                t->cells[t->rows - 1] = top;
+                for (int c = 0; c < t->cols; c++) {
+                    t->cells[t->rows - 1][c].ch    = ' ';
+                    t->cells[t->rows - 1][c].dirty = 1;
+                }
+            }
+            mark_all_dirty(t);
+            break;
+        }
+        case 'X': {
+            int n = (p0 < 1) ? 1 : p0;
+            for (int c = t->cursor_col;
+                 c < t->cursor_col + n && c < t->cols; c++) {
+                t->cells[t->cursor_row][c].ch    = ' ';
+                t->cells[t->cursor_row][c].dirty = 1;
+            }
+            break;
+        }
         case 'h':
-            /* Mode set/reset — e.g. \x1b[?25h shows cursor.
-             * We acknowledge but don't fully implement these yet. */
+        case 'l':
+        case 'r':
+        case 'n':
+        case 'c':
             break;
 
         default:
-            /* Unknown sequence — silently ignore */
             break;
     }
 }
 
-/*
- * terminal_process — the main parser.
- * Call this every time you get bytes from the PTY.
- * It feeds bytes one at a time through the state machine.
- */
+
+/* ── terminal_process ───────────────────────────────────────── */
+
 void terminal_process(Terminal *t, const char *buf, int len) {
     for (int i = 0; i < len; i++) {
         unsigned char c = (unsigned char)buf[i];
@@ -364,7 +452,6 @@ void terminal_process(Terminal *t, const char *buf, int len) {
 
             case STATE_NORMAL:
                 if (c == 0x1b) {
-                    /* ESC byte — start of escape sequence */
                     t->state = STATE_ESCAPE;
 
                 } else if (c == '\r') {
@@ -381,50 +468,59 @@ void terminal_process(Terminal *t, const char *buf, int len) {
                     if (t->cursor_col > 0) t->cursor_col--;
 
                 } else if (c == '\t') {
-                    /* Tab: advance to next 8-column boundary */
                     t->cursor_col = (t->cursor_col + 8) & ~7;
                     if (t->cursor_col >= t->cols)
                         t->cursor_col = t->cols - 1;
 
+                } else if (c == 0x07 || c == 0x0e || c == 0x0f) {
+                    /* BEL, SO, SI — ignore */
+
                 } else if (c >= 32 && c < 127) {
                     put_char(t, (char)c);
-
                 }
-                /* Other control chars (BEL, etc.) — ignore */
                 break;
 
             case STATE_ESCAPE:
                 if (c == '[') {
-                    /* CSI introducer — start collecting params */
-                    t->state = STATE_CSI;
+                    t->state      = STATE_CSI;
                     t->params_len = 0;
                     memset(t->params, 0, sizeof(t->params));
+
                 } else if (c == 'c') {
-                    /* Full reset — rare but handle it */
+                    for (int r = 0; r < t->rows; r++)
+                        for (int col = 0; col < t->cols; col++) {
+                            t->cells[r][col].ch    = ' ';
+                            t->cells[r][col].fg    = DEFAULT_FG;
+                            t->cells[r][col].bg    = DEFAULT_BG;
+                            t->cells[r][col].dirty = 1;
+                        }
+                    t->cursor_row = 0;
+                    t->cursor_col = 0;
+                    t->current_fg = DEFAULT_FG;
+                    t->current_bg = DEFAULT_BG;
+                    t->bold       = 0;
+                    t->state      = STATE_NORMAL;
+
+                } else if (c == 'M') {
+                    if (t->cursor_row > 0) t->cursor_row--;
                     t->state = STATE_NORMAL;
+
                 } else {
-                    /* Unrecognized escape — go back to normal */
                     t->state = STATE_NORMAL;
                 }
                 break;
 
             case STATE_CSI:
-                if ((c >= '0' && c <= '9') || c == ';' || c == '?') {
-                    /* Parameter character — accumulate it */
+                if ((c >= '0' && c <= '9') || c == ';' || c == '?'
+                        || c == '!' || c == '"' || c == '$') {
                     if (t->params_len < (int)sizeof(t->params) - 1) {
                         t->params[t->params_len++] = (char)c;
                         t->params[t->params_len]   = '\0';
                     }
                 } else if (c >= 0x40 && c <= 0x7e) {
-                    /*
-                     * Final byte (any letter A-Z, a-z, @).
-                     * This completes the escape sequence.
-                     * Apply it and return to NORMAL state.
-                     */
                     apply_csi(t, (char)c);
                     t->state = STATE_NORMAL;
                 } else {
-                    /* Unexpected byte — abort sequence */
                     t->state = STATE_NORMAL;
                 }
                 break;
@@ -432,29 +528,115 @@ void terminal_process(Terminal *t, const char *buf, int len) {
     }
 }
 
-/*
- * terminal_resize — rebuild the grid at a new size.
- * Called when the user drags the window to a new size.
- */
-void terminal_resize(Terminal *t, int cols, int rows) {
-    /* Free old grid */
-    for (int r = 0; r < t->rows; r++) free(t->cells[r]);
-    free(t->cells);
 
-    /* Rebuild at new size */
+/* ── terminal_resize ────────────────────────────────────────── */
+
+void terminal_resize(Terminal *t, int cols, int rows) {
+    if (t->cells) {
+        for (int r = 0; r < t->rows; r++) free(t->cells[r]);
+        free(t->cells);
+        t->cells = NULL;
+    }
+
     t->cols = cols;
     t->rows = rows;
+
     t->cells = calloc(rows, sizeof(Cell *));
+    if (!t->cells) return;
+
     for (int r = 0; r < rows; r++) {
         t->cells[r] = calloc(cols, sizeof(Cell));
+        if (!t->cells[r]) return;
         for (int c = 0; c < cols; c++) {
-            t->cells[r][c].ch = ' ';
-            t->cells[r][c].fg = DEFAULT_FG;
-            t->cells[r][c].bg = DEFAULT_BG;
+            t->cells[r][c].ch    = ' ';
+            t->cells[r][c].fg    = DEFAULT_FG;
+            t->cells[r][c].bg    = DEFAULT_BG;
+            t->cells[r][c].dirty = 1;
         }
     }
 
-    /* Reset cursor to safe position */
     if (t->cursor_row >= rows) t->cursor_row = rows - 1;
     if (t->cursor_col >= cols) t->cursor_col = cols - 1;
+    if (t->cursor_row < 0)    t->cursor_row = 0;
+    if (t->cursor_col < 0)    t->cursor_col = 0;
+}
+
+
+/* ── Scrollback public API ──────────────────────────────────── */
+
+/*
+ * scrollback_get — retrieve a stored line by recency index.
+ *
+ * index 0 = most recently pushed (newest history line).
+ * index sb_count-1 = oldest stored line.
+ *
+ * sb_head points to the NEXT write slot, so most recent
+ * entry is at (sb_head - 1) with wraparound.
+ */
+ScrollbackLine *scrollback_get(Terminal *t, int index) {
+    if (index < 0 || index >= t->sb_count) return NULL;
+    int pos = (t->sb_head - 1 - index + SCROLLBACK_MAX) % SCROLLBACK_MAX;
+    return &t->scrollback[pos];
+}
+
+/*
+ * terminal_get_display_row — resolve which Cell array to render.
+ *
+ * MENTAL MODEL — think of one long continuous tape:
+ *
+ *  index:  0        1  ...  sb_count-1 | sb_count  ...  sb_count+rows-1
+ *          ^oldest history             ^           live screen          ^
+ *                                      |
+ *                              boundary between
+ *                              scrollback and live
+ *
+ * scroll_offset=0 → viewport shows [sb_count .. sb_count+rows-1]  (live)
+ * scroll_offset=N → viewport shows [sb_count-N .. sb_count-N+rows-1]
+ *
+ * For each screen_row (0=top of window):
+ *
+ *   total      = sb_count + rows
+ *   view_bottom = total - scroll_offset
+ *   view_top    = view_bottom - rows
+ *   line_index  = view_top + screen_row
+ *
+ *   line_index < sb_count  → scrollback
+ *     sb_index = (sb_count - 1) - line_index   (newest=0 mapping)
+ *
+ *   line_index >= sb_count → live screen
+ *     live_row = line_index - sb_count
+ */
+Cell *terminal_get_display_row(Terminal *t, int screen_row) {
+
+    /* Fast path — live view, no math needed */
+    if (t->scroll_offset == 0) {
+        return t->cells[screen_row];
+    }
+
+    int total       = t->sb_count + t->rows;
+    int view_bottom = total - t->scroll_offset;
+    int view_top    = view_bottom - t->rows;
+    int line_index  = view_top + screen_row;
+
+    /* Completely out of range — render blank */
+    if (line_index < 0 || line_index >= total) {
+        return NULL;
+    }
+
+    if (line_index < t->sb_count) {
+        /*
+         * In scrollback history.
+         * line_index 0 = oldest stored line → sb_index = sb_count-1
+         * line_index sb_count-1 = newest  → sb_index = 0
+         */
+        int sb_index = (t->sb_count - 1) - line_index;
+        ScrollbackLine *sl = scrollback_get(t, sb_index);
+        return sl ? sl->cells : NULL;
+    } else {
+        /* In live screen */
+        int live_row = line_index - t->sb_count;
+        if (live_row >= 0 && live_row < t->rows)
+            return t->cells[live_row];
+        return NULL;
+    }
 }
