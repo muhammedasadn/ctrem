@@ -1,225 +1,240 @@
-#define _GNU_SOURCE  /* For openpty() and other GNU extensions Decalre in linux */
+/*
+ * pty.c — Pseudo-terminal implementation for cterm.
+ *
+ * IMPORTANT: _GNU_SOURCE and _DEFAULT_SOURCE must be the very
+ * first lines before any #include. The system headers use
+ * feature-test macros to decide what to expose. If these
+ * defines appear after an #include, that header has already
+ * been processed and openpty() declaration was skipped.
+ */
 
+/* Feature-test macros — MUST come before every #include */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
+/*
+ * On Ubuntu/Debian, openpty() is declared in <pty.h>.
+ * Including <utmp.h> first ensures all required types
+ * (struct utmp etc.) are defined before <pty.h> uses them.
+ * This is the correct include order for these headers.
+ */
+#include <utmp.h>
+#include <pty.h>
+
+/* Now include our own header and the rest of the standard lib */
 #include "pty.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <pty.h>          /* openpty()                          */
-#include <utmp.h>          /* struct winsize                      */
-#include <sys/ioctl.h>    /* ioctl(), struct winsize            */
-#include <sys/wait.h>     /* waitpid()                          */
-#include <signal.h>       /* SIGHUP                             */
+#include <sys/ioctl.h>   /* ioctl(), struct winsize, TIOCSWINSZ  */
+#include <sys/wait.h>    /* waitpid()                             */
+#include <signal.h>      /* SIGHUP, kill()                        */
+
+
+/* ── pty_init ───────────────────────────────────────────────── */
 
 /*
- * pty_init — the heart of the terminal emulator.
+ * Opens a PTY pair, forks a child, and exec's bash.
  *
- * This function does three things:
- *   1. Opens a PTY pair (master + slave file descriptors)
- *   2. Forks a new process (creates a copy of our program)
- *   3. In the child: exec bash (replace child with bash)
- *   4. In the parent: store the master_fd, continue running
+ * How fork+exec works:
+ *   fork()  — splits the process into two identical copies.
+ *             Returns 0 in the child, child-PID in the parent.
+ *   exec()  — replaces the child's program image with bash.
+ *             After exec, the child IS bash.
  *
- * "Fork and exec" is the Unix way to start new programs.
- * fork() splits the process into two identical copies.
- * exec() replaces the current process with a new program.
+ * Parent keeps the master_fd and communicates with bash.
+ * Child connects the slave_fd to stdin/stdout/stderr and
+ * becomes bash via execl().
  */
 int pty_init(PTY *p, int cols, int rows) {
-
     p->cols = cols;
     p->rows = rows;
 
     /*
-     * struct winsize tells the kernel the terminal dimensions.
-     * bash uses this to wrap long lines and format output.
-     * Programs like vim, htop use it to draw their UI correctly.
+     * struct winsize — terminal dimensions in characters.
+     * bash and TUI programs (vim, htop, nano) read this to
+     * know how wide to wrap lines and draw their interfaces.
      */
-    struct winsize ws = {
-        .ws_row    = rows,
-        .ws_col    = cols,
-        .ws_xpixel = 0,
-        .ws_ypixel = 0
-    };
+    struct winsize ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.ws_row = (unsigned short)rows;
+    ws.ws_col = (unsigned short)cols;
 
     int master_fd, slave_fd;
 
     /*
-     * openpty() — asks the kernel for a fresh PTY pair.
-     * Fills master_fd and slave_fd with the two ends.
-     * The last two NULLs are for terminal settings we
-     * don't need to customize right now.
+     * openpty() — ask the kernel for a fresh PTY pair.
+     * Fills master_fd (our end) and slave_fd (bash's end).
      */
     if (openpty(&master_fd, &slave_fd, NULL, NULL, &ws) != 0) {
-        perror("openpty failed");
+        perror("pty_init: openpty failed");
         return -1;
     }
 
     p->master_fd = master_fd;
 
     /*
-     * fork() creates a copy of the current process.
-     * After fork(), TWO processes are running this same code.
-     * fork() returns:
-     *   0         → you are the CHILD process
-     *   positive  → you are the PARENT, value is child's PID
-     *   -1        → fork failed (rare, system is out of resources)
+     * fork() — create a copy of this process.
+     *
+     * After fork(), two processes run simultaneously:
+     *   child  (pid == 0): will become bash
+     *   parent (pid > 0) : stays as cterm
      */
     pid_t pid = fork();
 
     if (pid < 0) {
-        perror("fork failed");
+        perror("pty_init: fork failed");
+        close(master_fd);
+        close(slave_fd);
         return -1;
     }
 
     if (pid == 0) {
-        /*
-         * ===== CHILD PROCESS =====
-         * This code only runs in the child.
-         * Goal: become a new session, connect to the slave PTY,
-         * then replace ourselves with bash.
-         */
+        /* ════════════════════════════════════════════════════
+         * CHILD PROCESS — become bash
+         * ════════════════════════════════════════════════════ */
 
-        /* Close the master end — child doesn't need it */
+        /* Child doesn't use the master end */
         close(master_fd);
 
         /*
-         * setsid() creates a new "session".
-         * A session is a group of processes with one controlling terminal.
-         * This detaches the child from our terminal so it can have
-         * its own (the PTY slave).
+         * setsid() — create a new session.
+         * Detaches from cterm's controlling terminal so the
+         * child can adopt the PTY slave as its own.
          */
         if (setsid() < 0) {
-            perror("setsid failed");
-            exit(1);
+            perror("child: setsid failed");
+            _exit(1);
         }
 
         /*
-         * TIOCSCTTY makes the slave PTY the controlling terminal
-         * of our new session. This is what lets bash receive
-         * signals like Ctrl+C (SIGINT) correctly.
+         * TIOCSCTTY — make slave_fd the controlling terminal
+         * of this new session. Required so that bash correctly
+         * receives signals like Ctrl+C (SIGINT).
          */
         if (ioctl(slave_fd, TIOCSCTTY, 0) < 0) {
-            perror("ioctl TIOCSCTTY failed");
-            exit(1);
+            perror("child: TIOCSCTTY failed");
+            _exit(1);
         }
 
         /*
-         * dup2(old_fd, new_fd) — duplicate a file descriptor.
-         * Here we connect the three standard streams to the slave PTY:
-         *   stdin  (fd 0) = slave PTY  → bash reads keyboard input from here
-         *   stdout (fd 1) = slave PTY  → bash writes output here
-         *   stderr (fd 2) = slave PTY  → bash writes errors here
+         * dup2(old, new) — make 'new' a copy of 'old'.
+         * Connects standard streams to the slave PTY so that
+         * bash reads from and writes to our terminal.
          */
-        dup2(slave_fd, STDIN_FILENO);   /* fd 0 */
-        dup2(slave_fd, STDOUT_FILENO);  /* fd 1 */
-        dup2(slave_fd, STDERR_FILENO);  /* fd 2 */
+        dup2(slave_fd, STDIN_FILENO);   /* fd 0 = stdin  */
+        dup2(slave_fd, STDOUT_FILENO);  /* fd 1 = stdout */
+        dup2(slave_fd, STDERR_FILENO);  /* fd 2 = stderr */
 
-        /* Close the slave fd itself — we now have it as 0, 1, 2 */
+        /* slave_fd is now redundant — we have it as 0,1,2 */
         close(slave_fd);
 
         /*
-         * Set the TERM environment variable.
-         * Programs check $TERM to know what escape sequences they can use.
-         * "xterm-256color" tells them: full color support, standard VT100.
+         * Tell programs what terminal type we emulate.
+         * xterm-256color = VT100 + ANSI colors + 256-color palette.
          */
         setenv("TERM", "xterm-256color", 1);
 
         /*
-         * execl() replaces this process with bash.
-         * After execl(), this code no longer exists — bash takes over.
-         * The arguments are: program path, arg0 (program name), NULL terminator.
-         * "-bash" with a dash prefix tells bash to run as a login shell.
+         * execl() — replace this process with bash.
+         * The leading "-" in "-bash" tells bash to act as a
+         * login shell and source ~/.bashrc, ~/.profile etc.
+         * If execl returns, it failed.
          */
         execl("/bin/bash", "-bash", NULL);
 
-        /* execl only returns if it FAILED */
-        perror("execl failed");
-        exit(1);
+        perror("child: execl /bin/bash failed");
+        _exit(1);
     }
 
-    /*
-     * ===== PARENT PROCESS =====
-     * If we reach here, we are the parent (cterm).
-     * pid holds the child's (bash's) PID.
-     */
+    /* ════════════════════════════════════════════════════════════
+     * PARENT PROCESS — continue as cterm
+     * ════════════════════════════════════════════════════════════ */
 
-    /* Close slave end — parent only needs the master */
+    /* Parent only needs the master end */
     close(slave_fd);
 
     p->shell_pid = pid;
 
     /*
-     * Make master_fd non-blocking.
-     * Without this, read() on master_fd would BLOCK (freeze) if
-     * there's no data yet. Non-blocking means read() returns
-     * immediately with -1 if nothing is available, so our
-     * render loop keeps running while waiting for bash output.
+     * Set O_NONBLOCK on the master fd.
      *
-     * F_GETFL = get current file flags
-     * F_SETFL = set file flags
-     * O_NONBLOCK = the non-blocking flag
+     * Without this, read(master_fd) would block (freeze the
+     * render loop) whenever bash hasn't produced output yet.
+     * With O_NONBLOCK, read() returns -1 with errno=EAGAIN
+     * immediately when nothing is available, keeping the loop
+     * running smoothly at full framerate.
      */
     int flags = fcntl(master_fd, F_GETFL, 0);
-    fcntl(master_fd, F_SETFL, flags | O_NONBLOCK);
+    if (flags != -1) {
+        fcntl(master_fd, F_SETFL, flags | O_NONBLOCK);
+    }
 
-    printf("PTY created: shell PID=%d, master_fd=%d\n",
+    printf("PTY ready: shell PID=%d  master_fd=%d\n",
            p->shell_pid, p->master_fd);
     return 0;
 }
 
-/*
- * pty_read — read whatever bash has written to the PTY.
- * Returns number of bytes read, 0 if nothing available, -1 on error.
- */
+
+/* ── pty_read ────────────────────────────────────────────────── */
+
 int pty_read(PTY *p, char *buf, int bufsize) {
-    int n = read(p->master_fd, buf, bufsize - 1);
+    int n = (int)read(p->master_fd, buf, (size_t)(bufsize - 1));
     if (n > 0) {
-        buf[n] = '\0';  /* Null-terminate so we can use it as a string */
+        buf[n] = '\0';
     }
     return n;
 }
 
-/*
- * pty_write — send a keypress (or string) to bash.
- * Returns number of bytes written.
- */
+
+/* ── pty_write ───────────────────────────────────────────────── */
+
 int pty_write(PTY *p, const char *buf, int len) {
-    return write(p->master_fd, buf, len);
+    return (int)write(p->master_fd, buf, (size_t)len);
 }
 
-/*
- * pty_resize — tell bash the window changed size.
- * Called when the user resizes the SDL2 window.
- * Without this, vim/htop/nano would draw in wrong dimensions.
- */
+
+/* ── pty_resize ──────────────────────────────────────────────── */
+
 void pty_resize(PTY *p, int cols, int rows) {
     p->cols = cols;
     p->rows = rows;
 
-    struct winsize ws = {
-        .ws_row = rows,
-        .ws_col = cols
-    };
+    struct winsize ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.ws_row = (unsigned short)rows;
+    ws.ws_col = (unsigned short)cols;
 
-    /* TIOCSWINSZ = "Terminal I/O Control Set Window Size" */
+    /* TIOCSWINSZ = "Terminal IO Control Set WINdow SiZe" */
     ioctl(p->master_fd, TIOCSWINSZ, &ws);
 }
 
-/*
- * pty_destroy — cleanly shut down the PTY and bash process.
- */
+
+/* ── pty_destroy ─────────────────────────────────────────────── */
+
 void pty_destroy(PTY *p) {
-    /* Send SIGHUP to bash — "terminal disconnected, please exit" */
+    /*
+     * SIGHUP = "hangup" — sent when a terminal disconnects.
+     * bash responds by saving history and exiting cleanly.
+     * waitpid() collects the exit status so bash doesn't
+     * become a zombie process.
+     */
     if (p->shell_pid > 0) {
         kill(p->shell_pid, SIGHUP);
-
-        /* Wait for bash to actually exit — avoids zombie processes */
         waitpid(p->shell_pid, NULL, 0);
+        p->shell_pid = 0;
     }
 
     if (p->master_fd >= 0) {
         close(p->master_fd);
+        p->master_fd = -1;
     }
 
     printf("PTY destroyed.\n");
