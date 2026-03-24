@@ -1,210 +1,248 @@
+/*
+ * font.c — FreeType glyph cache and text rendering.
+ *
+ * Loads a .ttf font file, rasterises every printable ASCII
+ * character into SDL2 GPU textures, and caches them.
+ * Drawing a character is then just a fast GPU texture blit.
+ *
+ * Fix for "p/g/y look wrong":
+ *   The vertical position of each glyph must be calculated
+ *   from the font's ascender (how high above the baseline
+ *   the tallest character reaches). We use:
+ *
+ *     glyph_y = cell_top + ascender - bearing_y
+ *
+ *   Where:
+ *     cell_top   = top of the cell in pixels (y argument)
+ *     ascender   = font-wide value: pixels above baseline
+ *     bearing_y  = glyph-specific: pixels above baseline
+ *
+ *   This places every glyph on a shared invisible baseline,
+ *   so "A" and "p" align correctly even though "p" has a
+ *   descender that hangs below the baseline.
+ */
+
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 
 #include "font.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/*
- * font_init — loads a .ttf file and pre-renders all printable
- * ASCII characters into GPU textures.
- *
- * Parameters:
- *   f        — pointer to our Font struct
- *   renderer — the SDL2 renderer (needed to create textures)
- *   path     — file path to the .ttf font file
- *   size     — font size in pixels (e.g. 16)
- *
- * Returns 0 on success, -1 on failure.
- */
+
+/* ── font_init ──────────────────────────────────────────────── */
+
 int font_init(Font *f, SDL_Renderer *renderer,
               const char *path, int size) {
 
-    /* Zero out the struct so all pointers start as NULL.
-     * memset fills a block of memory with a given value.
-     * sizeof(Font) = total bytes the Font struct occupies. */
     memset(f, 0, sizeof(Font));
     f->size = size;
 
-    /* Step 1: Initialize the FreeType library */
+    /* ── Step 1: Init FreeType library ── */
     if (FT_Init_FreeType(&f->library) != 0) {
-        printf("FreeType init failed\n");
+        fprintf(stderr, "font_init: FT_Init_FreeType failed\n");
         return -1;
     }
 
-    /* Step 2: Load the font file into a "face"
-     * A face = one font + one style (e.g. Regular, Bold)
-     * The 0 at the end = use the first face in the file */
+    /* ── Step 2: Load the font file ── */
     if (FT_New_Face(f->library, path, 0, &f->face) != 0) {
-        printf("Failed to load font: %s\n", path);
+        fprintf(stderr, "font_init: FT_New_Face failed: %s\n", path);
         FT_Done_FreeType(f->library);
         return -1;
     }
 
-    /* Step 3: Set the font size.
+    /* ── Step 3: Set pixel size ── */
+    /*
      * FT_Set_Pixel_Sizes(face, width, height)
-     * 0 for width = auto-calculate from height */
-    FT_Set_Pixel_Sizes(f->face, 0, size);
+     * Passing 0 for width tells FreeType to auto-calculate
+     * width from the height, preserving the font's aspect ratio.
+     */
+    FT_Set_Pixel_Sizes(f->face, 0, (FT_UInt)size);
 
-    /* Step 4: Pre-render all printable ASCII characters.
-     * ASCII 32 = space, 127 = DEL (we stop before that).
-     * We loop through every printable character and cache it. */
+    /*
+     * ── Step 4: Read font-wide metrics ──
+     *
+     * FreeType metrics are in 26.6 fixed-point format.
+     * That means the value is in units of 1/64 pixel.
+     * Shifting right by 6 (dividing by 64) converts to pixels.
+     *
+     * ascender  — distance from baseline to top of tallest glyph
+     *             (positive, e.g. top of 'H' or 'd')
+     * descender — distance from baseline to bottom of deepest glyph
+     *             (negative in FreeType, e.g. bottom of 'p' or 'g')
+     * height    — total line height including leading (line gap)
+     */
+    int ascender  = (int)(f->face->size->metrics.ascender  >> 6);
+    int descender = (int)(f->face->size->metrics.descender >> 6);
+    /* descender is negative — negate it to get the depth below baseline */
+    if (descender < 0) descender = -descender;
+
+    f->ascender = ascender;  /* store for use in font_draw_char */
+
+    /* ── Step 5: Rasterise every printable ASCII character ── */
     for (int c = 32; c < GLYPH_COUNT; c++) {
 
-        /* FT_LOAD_RENDER = load the glyph AND rasterize it.
-         * After this call, f->face->glyph->bitmap holds pixels. */
-        if (FT_Load_Char(f->face, c, FT_LOAD_RENDER) != 0) {
-            printf("Failed to load glyph '%c'\n", c);
-            continue;  /* Skip this character, don't crash */
+        /*
+         * FT_LOAD_RENDER — load the glyph outline AND rasterise
+         * it into a bitmap in one step.
+         * After this call, f->face->glyph->bitmap holds pixels.
+         */
+        if (FT_Load_Char(f->face, (FT_ULong)c, FT_LOAD_RENDER) != 0) {
+            /* Skip characters that fail to load */
+            continue;
         }
 
         FT_GlyphSlot slot = f->face->glyph;
         FT_Bitmap   *bmp  = &slot->bitmap;
 
-        /* Store the positioning metrics.
-         * advance.x is in 26.6 fixed-point format (1/64 pixels).
-         * Shifting right by 6 divides by 64, giving us real pixels. */
+        /*
+         * Store glyph metrics.
+         *
+         * bearing_x — horizontal offset from the pen position
+         *             to the left edge of the glyph bitmap.
+         *             Positive = glyph starts to the right of pen.
+         *
+         * bearing_y — vertical offset from the baseline to the
+         *             TOP of the glyph bitmap (positive = above
+         *             baseline). Used for vertical placement.
+         *
+         * advance   — how far to move the pen after drawing.
+         *             In 26.6 fixed-point — shift right 6 = pixels.
+         */
         f->cache[c].bearing_x = slot->bitmap_left;
         f->cache[c].bearing_y = slot->bitmap_top;
-        f->cache[c].advance   = slot->advance.x >> 6;
-        f->cache[c].width     = bmp->width;
-        f->cache[c].height    = bmp->rows;
+        f->cache[c].advance   = (int)(slot->advance.x >> 6);
+        f->cache[c].width     = (int)bmp->width;
+        f->cache[c].height    = (int)bmp->rows;
 
-        /* Some characters (like space) have no visible pixels.
-         * Skip creating a texture for them — they have no bitmap. */
-        if (bmp->width == 0 || bmp->rows == 0) {
+        /* Characters like space have no visible pixels */
+        if (bmp->width == 0 || bmp->rows == 0) continue;
+
+        /*
+         * Convert FreeType's grayscale bitmap to RGBA.
+         *
+         * FreeType gives: 1 byte per pixel, 0=transparent 255=opaque.
+         * SDL2 needs:     4 bytes per pixel (R, G, B, A).
+         *
+         * We set RGB=white (255,255,255) and A=FreeType's value.
+         * Later, SDL_SetTextureColorMod() multiplies the RGB by
+         * whatever color we want — white*color = color. This lets
+         * us draw the same cached texture in any color efficiently.
+         */
+        Uint8 *rgba = malloc((size_t)(bmp->width * bmp->rows * 4));
+        if (!rgba) {
+            fprintf(stderr, "font_init: out of memory for glyph %d\n", c);
             continue;
         }
 
-        /*
-         * FreeType gives us a GRAYSCALE bitmap: one byte per pixel,
-         * 0 = transparent, 255 = fully opaque.
-         *
-         * SDL2 needs RGBA: 4 bytes per pixel.
-         * We write bytes in order: R=255, G=255, B=255, A=glyph_alpha.
-         *
-         * IMPORTANT: We use SDL_PIXELFORMAT_ABGR8888 below.
-         * On Linux, SDL stores pixels in memory as B,G,R,A but the
-         * format name is from the GPU's perspective (reversed).
-         * ABGR8888 matches our byte order: [R][G][B][A] in memory.
-         * Using RGBA8888 here would swap red and blue channels,
-         * making all text appear with wrong colors.
-         */
-        Uint8 *rgba = malloc(bmp->width * bmp->rows * 4);
-        if (!rgba) {
-            printf("Out of memory allocating glyph buffer\n");
-            return -1;
-        }
-
         for (int i = 0; i < (int)(bmp->width * bmp->rows); i++) {
-            rgba[i * 4 + 0] = 255;             /* Red   channel = full */
-            rgba[i * 4 + 1] = 255;             /* Green channel = full */
-            rgba[i * 4 + 2] = 255;             /* Blue  channel = full */
-            rgba[i * 4 + 3] = bmp->buffer[i];  /* Alpha from FreeType  */
+            rgba[i * 4 + 0] = 255;              /* R */
+            rgba[i * 4 + 1] = 255;              /* G */
+            rgba[i * 4 + 2] = 255;              /* B */
+            rgba[i * 4 + 3] = bmp->buffer[i];   /* A */
         }
 
         /*
-         * Create an SDL2 texture on the GPU.
-         * SDL_PIXELFORMAT_ABGR8888 matches our [R,G,B,A] byte layout.
-         * SDL_TEXTUREACCESS_STATIC = upload once, read many times.
+         * SDL_PIXELFORMAT_ABGR8888 — correct byte order on Linux.
+         * SDL_TEXTUREACCESS_STATIC — uploaded once, read many times.
          */
         SDL_Texture *tex = SDL_CreateTexture(
             renderer,
-            SDL_PIXELFORMAT_ABGR8888,      /* FIX: was RGBA8888 */
+            SDL_PIXELFORMAT_ABGR8888,
             SDL_TEXTUREACCESS_STATIC,
-            bmp->width,
-            bmp->rows
+            (int)bmp->width,
+            (int)bmp->rows
         );
 
         if (!tex) {
-            printf("SDL_CreateTexture failed for '%c': %s\n",
-                   c, SDL_GetError());
             free(rgba);
             continue;
         }
 
-        /* Upload pixel data into the texture.
-         * pitch = bytes per row = width * 4 bytes per pixel */
-        SDL_UpdateTexture(tex, NULL, rgba, bmp->width * 4);
+        /* Upload pixel data. pitch = bytes per row */
+        SDL_UpdateTexture(tex, NULL, rgba,
+                          (int)bmp->width * 4);
 
-        /* Enable alpha blending so glyph edges blend with the background */
+        /* Enable alpha blending so glyph edges are anti-aliased */
         SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
 
-        free(rgba); /* CPU copy no longer needed — GPU has it now */
-
+        free(rgba);
         f->cache[c].texture = tex;
     }
 
+    /* ── Step 6: Compute cell dimensions ── */
     /*
-     * Determine cell dimensions — how much space one character occupies.
+     * cell_width  = advance of 'M' (widest typical character)
+     * cell_height = total line height from FreeType metrics
+     *               = ascender + descender (both positive here)
      *
-     * cell_width:  use the advance of 'M' — widest typical character.
-     *              In a true monospace font every character has the same
-     *              advance, so any character would give the same result.
-     *
-     * cell_height: use FreeType's own line height metric.
-     *              face->size->metrics.height is in 26.6 fixed-point,
-     *              so we shift right 6 to get real pixels.
-     *              This is more accurate than (size + padding) guessing.
+     * Adding a small leading (extra spacing between lines)
+     * improves readability. We add 2px.
      */
     f->cell_width  = f->cache['M'].advance;
-    f->cell_height = (int)(f->face->size->metrics.height >> 6);
+    f->cell_height = ascender + descender + 2;
 
-    /* Safety fallback in case metrics return zero (rare but possible) */
-    if (f->cell_height <= 0) f->cell_height = size + 4;
+    /* Safety fallbacks */
     if (f->cell_width  <= 0) f->cell_width  = size / 2;
+    if (f->cell_height <= 0) f->cell_height = size + 4;
+    if (f->ascender    <= 0) f->ascender    = size;
 
-    printf("Font loaded: %s @ %dpx\n", path, size);
-    printf("Cell size: %dx%d px\n", f->cell_width, f->cell_height);
-
-    return 0;  /* FIX: was missing — function must return int */
+    printf("Font loaded: %s @ %dpx  cell=%dx%d  ascender=%d\n",
+           path, size, f->cell_width, f->cell_height, f->ascender);
+    return 0;
 }
 
+
+/* ── font_draw_char ─────────────────────────────────────────── */
+
 /*
- * font_draw_char — draws a single character at pixel position (x, y).
- * x, y is the TOP-LEFT corner of the character cell.
- * r, g, b controls the text color (0–255 each).
+ * Draws one character at cell position (x, y).
+ * x, y = top-left corner of the CHARACTER CELL (not the glyph).
+ *
+ * Vertical placement formula:
+ *
+ *   glyph_y = y + (ascender - bearing_y)
+ *
+ * Explanation:
+ *   - y is the top of the cell
+ *   - ascender is how far the tallest character rises above baseline
+ *   - so (y + ascender) is the pixel position of the baseline
+ *   - bearing_y is how far THIS glyph rises above the baseline
+ *   - subtracting bearing_y from the baseline gives the glyph top
+ *
+ * This formula works correctly for ALL characters:
+ *   'H' — large bearing_y, sits near cell top
+ *   'p' — bearing_y only covers part of height, descender hangs below
+ *   '.' — small bearing_y, sits near the baseline
  */
 void font_draw_char(Font *f, SDL_Renderer *renderer,
                     char c, int x, int y,
                     Uint8 r, Uint8 g, Uint8 b) {
 
-    /* Cast to unsigned to safely use as array index */
     unsigned char uc = (unsigned char)c;
-
-    /* Only handle printable ASCII range */
     if (uc < 32 || uc >= GLYPH_COUNT) return;
 
     Glyph *glyph = &f->cache[uc];
+    if (!glyph->texture) return;
 
-    /* Space and zero-bitmap chars have no texture — nothing to draw */
-    if (glyph->texture == NULL) return;
-
-    /*
-     * SDL_SetTextureColorMod multiplies the texture's RGB values by r,g,b.
-     * Our texture is white (255,255,255), so:
-     *   white * (r,g,b) = (r,g,b)
-     * This lets us reuse one white texture for any color without
-     * creating separate colored textures.
-     */
+    /* Apply color: SDL multiplies texture RGB by (r,g,b) */
     SDL_SetTextureColorMod(glyph->texture, r, g, b);
 
     /*
-     * Position the glyph using FreeType bearing metrics.
+     * Compute destination rectangle.
      *
-     * bearing_x = horizontal offset from cell left edge to glyph left.
-     *             Positive = shift right (most chars).
+     * dst.x = x + bearing_x
+     *   bearing_x shifts right for glyphs with left padding
+     *   (most monospace fonts have bearing_x = 0 or small positive)
      *
-     * bearing_y = distance from baseline UP to glyph top.
-     *             e.g. 'h' has high bearing_y, 'g' has low (descends below).
-     *
-     * We position y so the glyph sits correctly on the baseline.
-     * The baseline sits at (y + cell_height - descender_space).
-     * A simple reliable formula: y + (cell_height - bearing_y).
+     * dst.y = y + (ascender - bearing_y)
+     *   Places glyph on the correct baseline position
      */
     SDL_Rect dst = {
         x + glyph->bearing_x,
-        y + (f->cell_height - glyph->bearing_y),
+        y + (f->ascender - glyph->bearing_y),
         glyph->width,
         glyph->height
     };
@@ -212,9 +250,12 @@ void font_draw_char(Font *f, SDL_Renderer *renderer,
     SDL_RenderCopy(renderer, glyph->texture, NULL, &dst);
 }
 
+
+/* ── font_draw_string ───────────────────────────────────────── */
+
 /*
- * font_draw_string — draws a full null-terminated string at (x, y).
- * Advances the cursor by each character's advance width.
+ * Draws a null-terminated string starting at (x, y).
+ * Advances x by each character's advance width.
  */
 void font_draw_string(Font *f, SDL_Renderer *renderer,
                       const char *str, int x, int y,
@@ -222,44 +263,31 @@ void font_draw_string(Font *f, SDL_Renderer *renderer,
 
     int cursor_x = x;
 
-    /*
-     * In C, a string is an array of chars ending with '\0' (value 0).
-     * *str dereferences the pointer to get the current character.
-     * str++ moves the pointer forward by one byte (one character).
-     * The loop stops when *str == '\0' (end of string).
-     */
     while (*str != '\0') {
-        font_draw_char(f, renderer, *str, cursor_x, y, r, g, b);
-
-        /* Advance cursor rightward by this character's advance width */
         unsigned char uc = (unsigned char)*str;
-        if (uc >= 32 && uc < GLYPH_COUNT) {
+
+        font_draw_char(f, renderer, *str,
+                       cursor_x, y, r, g, b);
+
+        /* Advance by this glyph's width */
+        if (uc >= 32 && uc < GLYPH_COUNT)
             cursor_x += f->cache[uc].advance;
-        }
 
         str++;
     }
 }
 
-/*
- * font_destroy — free all GPU textures and FreeType resources.
- *
- * Rule: always free in REVERSE order of allocation.
- * We allocated: library → face → textures
- * We free:      textures → face → library
- */
-void font_destroy(Font *f) {
-    if (!f) return;
 
+/* ── font_destroy ───────────────────────────────────────────── */
+
+void font_destroy(Font *f) {
     for (int c = 32; c < GLYPH_COUNT; c++) {
         if (f->cache[c].texture) {
             SDL_DestroyTexture(f->cache[c].texture);
             f->cache[c].texture = NULL;
         }
     }
-
     if (f->face)    FT_Done_Face(f->face);
     if (f->library) FT_Done_FreeType(f->library);
-
     printf("Font destroyed.\n");
 }
