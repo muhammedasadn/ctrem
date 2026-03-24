@@ -18,7 +18,6 @@
  *        [LEAF B]  [LEAF C]
  */
 
-#define _GNU_SOURCE
 #include "pane.h"
 #include <stdio.h>
 #include <stdlib.h>
