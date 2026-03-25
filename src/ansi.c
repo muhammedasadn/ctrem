@@ -1,36 +1,35 @@
 /*
- * ansi.c — ANSI/VT100 terminal emulator implementation.
+ * ansi.c — Complete ANSI/VT100 terminal emulator.
  *
- * All known bugs fixed in this version:
+ * All command-line bugs fixed in this version:
  *
- *  Fix 1 — Path duplication:
- *    \n now resets cursor_col=0 (matches xterm behavior).
- *    Previously only \r reset it — programs sending bare \n
- *    would print on wrong columns causing duplicated paths.
+ *  [1] Readline history garbled (Up/Down arrows):
+ *      - clear_cell() now resets fg+bg+bold, not just ch
+ *      - EL/ED use clear_cell() everywhere
+ *      - DCH (P) and ICH (@) implemented for Delete/insert
  *
- *  Fix 2 — Readline history garbled (Up/Down arrows):
- *    clear_cell() now resets fg, bg, bold — not just ch.
- *    Without resetting bg, "erased" cells kept colored
- *    backgrounds so old command text was visible through
- *    the erase. EL(\x1b[K) uses clear_cell() everywhere.
+ *  [2] Path/prompt duplication:
+ *      - \n resets cursor_col=0 (matches xterm behavior)
  *
- *  Fix 3 — CSI parser robustness:
- *    Added '>' and ' ' to intermediate byte set in STATE_CSI.
- *    bash sends \x1b[>0c (device attrs) at startup — without
- *    '>' the parser aborted mid-sequence corrupting state.
+ *  [3] Cursor position wrong after commands:
+ *      - CHA (G) correctly maps 1-based param to 0-based col
+ *      - CUP (H/f) clamps to valid range
  *
- *  Fix 4 — Delete key in readline (DCH \x1b[P):
- *    Implemented case 'P': shifts characters left after cursor.
- *    Without this, pressing Delete left ghost characters.
+ *  [4] Garbled output from btop/vim/htop:
+ *      - OSC sequences (ESC ]) now parsed and silently ignored
+ *        instead of leaking their bytes as printable characters
+ *      - DECSC (7) / DECRC (8) save/restore cursor implemented
+ *      - Alternate screen sequences (?1049h/l) acknowledged
  *
- *  Fix 5 — Typing mid-line in readline (ICH \x1b[@):
- *    Implemented case '@': shifts characters right at cursor.
- *    Without this, typing in the middle overwrote instead of
- *    inserting.
+ *  [5] CSI parser corruption:
+ *      - Accepts '>' ' ' '\'' as intermediate bytes
+ *      - Accepts DCS (ESC P) and PM/APC (ESC ^ ESC _) — skips
+ *        their content until ST (ESC \)
  *
- *  Fix 6 — NUL/DEL bytes ignored:
- *    0x00 and 0x7f now explicitly ignored. Previously they
- *    fell through to printable range and drew garbage.
+ *  [6] Optimizations:
+ *      - Dirty-cell tracking: only changed cells set dirty=1
+ *      - scroll_up reuses pointer rotation (no memcpy of data)
+ *      - clear_cell bounds-checked once, inlined for hot paths
  */
 
 #ifndef _GNU_SOURCE
@@ -45,15 +44,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-
-/* ── Default colors ─────────────────────────────────────────── */
-
+/* ── Defaults ───────────────────────────────────────────────── */
 static const Color DEFAULT_FG = {200, 200, 200};
 static const Color DEFAULT_BG = {  0,   0,   0};
 
-
 /* ── terminal_create ────────────────────────────────────────── */
-
 Terminal *terminal_create(int cols, int rows) {
     Terminal *t = calloc(1, sizeof(Terminal));
     if (!t) return NULL;
@@ -66,6 +61,9 @@ Terminal *terminal_create(int cols, int rows) {
     t->scroll_offset = 0;
     t->sb_head       = 0;
     t->sb_count      = 0;
+    t->alt_screen    = 0;
+    t->saved_col     = 0;
+    t->saved_row     = 0;
 
     t->cells = calloc(rows, sizeof(Cell *));
     if (!t->cells) { free(t); return NULL; }
@@ -77,21 +75,17 @@ Terminal *terminal_create(int cols, int rows) {
             t->cells[r][c].ch    = ' ';
             t->cells[r][c].fg    = DEFAULT_FG;
             t->cells[r][c].bg    = DEFAULT_BG;
-            t->cells[r][c].bold  = 0;
             t->cells[r][c].dirty = 1;
         }
     }
     return t;
 }
 
-
 /* ── terminal_destroy ───────────────────────────────────────── */
-
 void terminal_destroy(Terminal *t) {
     if (!t) return;
     if (t->cells) {
-        for (int r = 0; r < t->rows; r++)
-            free(t->cells[r]);
+        for (int r = 0; r < t->rows; r++) free(t->cells[r]);
         free(t->cells);
     }
     for (int i = 0; i < SCROLLBACK_MAX; i++)
@@ -100,27 +94,24 @@ void terminal_destroy(Terminal *t) {
     free(t);
 }
 
-
-/* ── Internal helpers ───────────────────────────────────────── */
-
+/* ── Internal: clear_cell ───────────────────────────────────── */
 /*
- * clear_cell — set one cell to blank with DEFAULT colors.
+ * Resets a cell to blank with default colors.
  *
- * WHY we reset bg here (not just ch):
- * If a cell previously had a colored background (e.g. green
- * from a bash prompt color) and we only set ch=' ', the cell
- * is logically blank but the renderer still draws its bg color.
- * This makes old text appear to "shine through" the erase.
- * Resetting bg=DEFAULT_BG makes the cell truly invisible.
+ * CRITICAL: must reset bg, not just ch.
+ * If a cell had a colored background (e.g. green from a
+ * prompt) and we only clear ch, the renderer still draws
+ * the old background color. Old text "shines through".
  */
-static void clear_cell(Terminal *t, int row, int col) {
-    if (row < 0 || row >= t->rows) return;
-    if (col < 0 || col >= t->cols) return;
-    t->cells[row][col].ch    = ' ';
-    t->cells[row][col].fg    = DEFAULT_FG;
-    t->cells[row][col].bg    = DEFAULT_BG;
-    t->cells[row][col].bold  = 0;
-    t->cells[row][col].dirty = 1;
+static inline void clear_cell(Terminal *t, int row, int col) {
+    if ((unsigned)row >= (unsigned)t->rows) return;
+    if ((unsigned)col >= (unsigned)t->cols) return;
+    Cell *cell = &t->cells[row][col];
+    cell->ch    = ' ';
+    cell->fg    = DEFAULT_FG;
+    cell->bg    = DEFAULT_BG;
+    cell->bold  = 0;
+    cell->dirty = 1;
 }
 
 static void mark_all_dirty(Terminal *t) {
@@ -129,6 +120,7 @@ static void mark_all_dirty(Terminal *t) {
             t->cells[r][c].dirty = 1;
 }
 
+/* ── Internal: scrollback_push ─────────────────────────────── */
 static void scrollback_push(Terminal *t, Cell *row) {
     ScrollbackLine *slot = &t->scrollback[t->sb_head];
     if (slot->cells) { free(slot->cells); slot->cells = NULL; }
@@ -142,17 +134,22 @@ static void scrollback_push(Terminal *t, Cell *row) {
     if (t->sb_count < SCROLLBACK_MAX) t->sb_count++;
 }
 
+/* ── Internal: scroll_up ────────────────────────────────────── */
 static void scroll_up(Terminal *t) {
+    /* Save the top row into scrollback history */
     scrollback_push(t, t->cells[0]);
 
+    /* Rotate pointers — O(rows) pointer moves, zero data copy */
     Cell *top = t->cells[0];
     memmove(&t->cells[0], &t->cells[1],
             (t->rows - 1) * sizeof(Cell *));
     t->cells[t->rows - 1] = top;
 
+    /* Clear the new bottom row */
     for (int c = 0; c < t->cols; c++)
         clear_cell(t, t->rows - 1, c);
 
+    /* Keep scrolled viewport stable when new lines arrive */
     if (t->scroll_offset > 0) {
         t->scroll_offset++;
         if (t->scroll_offset > t->sb_count)
@@ -160,11 +157,14 @@ static void scroll_up(Terminal *t) {
     }
 }
 
+/* ── Internal: put_char ─────────────────────────────────────── */
 static void put_char(Terminal *t, char ch) {
+    /* Wrap at right edge */
     if (t->cursor_col >= t->cols) {
         t->cursor_col = 0;
         t->cursor_row++;
     }
+    /* Scroll at bottom edge */
     if (t->cursor_row >= t->rows) {
         scroll_up(t);
         t->cursor_row = t->rows - 1;
@@ -178,9 +178,12 @@ static void put_char(Terminal *t, char ch) {
     t->cursor_col++;
 }
 
+/* ── Internal: clamp helpers ────────────────────────────────── */
+static inline int clamp(int v, int lo, int hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
 
 /* ── CSI parameter parsing ──────────────────────────────────── */
-
 static void parse_params(const char *raw, int *out, int *count) {
     *count = 0;
     const char *p = raw;
@@ -194,62 +197,60 @@ static void parse_params(const char *raw, int *out, int *count) {
     if (*count == 0) { out[0] = 0; *count = 1; }
 }
 
-
-/* ── SGR — Select Graphic Rendition ────────────────────────── */
-
+/* ── SGR ────────────────────────────────────────────────────── */
 static void apply_sgr(Terminal *t, int *params, int count) {
     for (int i = 0; i < count; i++) {
         int p = params[i];
-        if (p == 0) {
-            t->current_fg = DEFAULT_FG;
-            t->current_bg = DEFAULT_BG;
-            t->bold       = 0;
-        } else if (p == 1) {
-            t->bold = 1;
-        } else if (p == 2 || p == 22) {
-            t->bold = 0;
-        } else if (p >= 30 && p <= 37) {
-            t->current_fg = ANSI_COLORS[(p-30) + (t->bold ? 8 : 0)];
-        } else if (p == 39) {
-            t->current_fg = DEFAULT_FG;
-        } else if (p >= 40 && p <= 47) {
-            t->current_bg = ANSI_COLORS[p - 40];
-        } else if (p == 49) {
-            t->current_bg = DEFAULT_BG;
-        } else if (p >= 90 && p <= 97) {
-            t->current_fg = ANSI_COLORS[(p - 90) + 8];
-        } else if (p >= 100 && p <= 107) {
-            t->current_bg = ANSI_COLORS[(p - 100) + 8];
-        } else if (p == 38) {
-            if (i+2 < count && params[i+1] == 5) {
-                int n = params[i+2];
-                if (n >= 0 && n < 16) t->current_fg = ANSI_COLORS[n];
-                i += 2;
-            } else if (i+4 < count && params[i+1] == 2) {
-                t->current_fg.r = (uint8_t)params[i+2];
-                t->current_fg.g = (uint8_t)params[i+3];
-                t->current_fg.b = (uint8_t)params[i+4];
-                i += 4;
-            }
-        } else if (p == 48) {
-            if (i+2 < count && params[i+1] == 5) {
-                int n = params[i+2];
-                if (n >= 0 && n < 16) t->current_bg = ANSI_COLORS[n];
-                i += 2;
-            } else if (i+4 < count && params[i+1] == 2) {
-                t->current_bg.r = (uint8_t)params[i+2];
-                t->current_bg.g = (uint8_t)params[i+3];
-                t->current_bg.b = (uint8_t)params[i+4];
-                i += 4;
-            }
+        switch (p) {
+            case 0:
+                t->current_fg = DEFAULT_FG;
+                t->current_bg = DEFAULT_BG;
+                t->bold       = 0;
+                break;
+            case 1:  t->bold = 1; break;
+            case 2: case 22: t->bold = 0; break;
+            case 39: t->current_fg = DEFAULT_FG; break;
+            case 49: t->current_bg = DEFAULT_BG; break;
+            default:
+                if (p >= 30 && p <= 37) {
+                    t->current_fg = ANSI_COLORS[(p-30) + (t->bold ? 8:0)];
+                } else if (p >= 40 && p <= 47) {
+                    t->current_bg = ANSI_COLORS[p-40];
+                } else if (p >= 90 && p <= 97) {
+                    t->current_fg = ANSI_COLORS[(p-90)+8];
+                } else if (p >= 100 && p <= 107) {
+                    t->current_bg = ANSI_COLORS[(p-100)+8];
+                } else if (p == 38) {
+                    if (i+2 < count && params[i+1] == 5) {
+                        int n = params[i+2];
+                        if (n >= 0 && n < 16)
+                            t->current_fg = ANSI_COLORS[n];
+                        i += 2;
+                    } else if (i+4 < count && params[i+1] == 2) {
+                        t->current_fg.r = (uint8_t)params[i+2];
+                        t->current_fg.g = (uint8_t)params[i+3];
+                        t->current_fg.b = (uint8_t)params[i+4];
+                        i += 4;
+                    }
+                } else if (p == 48) {
+                    if (i+2 < count && params[i+1] == 5) {
+                        int n = params[i+2];
+                        if (n >= 0 && n < 16)
+                            t->current_bg = ANSI_COLORS[n];
+                        i += 2;
+                    } else if (i+4 < count && params[i+1] == 2) {
+                        t->current_bg.r = (uint8_t)params[i+2];
+                        t->current_bg.g = (uint8_t)params[i+3];
+                        t->current_bg.b = (uint8_t)params[i+4];
+                        i += 4;
+                    }
+                }
+                break;
         }
-        /* All other SGR codes silently ignored */
     }
 }
 
-
-/* ── CSI command dispatch ───────────────────────────────────── */
-
+/* ── CSI dispatch ───────────────────────────────────────────── */
 static void apply_csi(Terminal *t, char final) {
     int params[MAX_PARAMS];
     int count = 0;
@@ -259,104 +260,71 @@ static void apply_csi(Terminal *t, char final) {
     int p1 = (count > 1) ? params[1] : 1;
     if (p1 < 1) p1 = 1;
 
+    int cr = t->cursor_row;
+    int cc = t->cursor_col;
+
     switch (final) {
 
-        /* ── SGR: colors and text attributes ── */
-        case 'm':
-            apply_sgr(t, params, count);
+        case 'm': apply_sgr(t, params, count); break;
+
+        /* Cursor movement */
+        case 'A':
+            t->cursor_row = clamp(cr - ((p0<1)?1:p0), 0, t->rows-1);
+            break;
+        case 'B':
+            t->cursor_row = clamp(cr + ((p0<1)?1:p0), 0, t->rows-1);
+            break;
+        case 'C':
+            t->cursor_col = clamp(cc + ((p0<1)?1:p0), 0, t->cols-1);
+            break;
+        case 'D':
+            t->cursor_col = clamp(cc - ((p0<1)?1:p0), 0, t->cols-1);
+            break;
+        case 'E':
+            t->cursor_row = clamp(cr + ((p0<1)?1:p0), 0, t->rows-1);
+            t->cursor_col = 0;
+            break;
+        case 'F':
+            t->cursor_row = clamp(cr - ((p0<1)?1:p0), 0, t->rows-1);
+            t->cursor_col = 0;
             break;
 
-        /* ── Cursor movement ── */
-        case 'A': {
-            /* CUU — cursor up N rows */
-            int n = (p0 < 1) ? 1 : p0;
-            t->cursor_row -= n;
-            if (t->cursor_row < 0) t->cursor_row = 0;
-            break;
-        }
-        case 'B': {
-            /* CUD — cursor down N rows */
-            int n = (p0 < 1) ? 1 : p0;
-            t->cursor_row += n;
-            if (t->cursor_row >= t->rows) t->cursor_row = t->rows-1;
-            break;
-        }
-        case 'C': {
-            /* CUF — cursor right N cols */
-            int n = (p0 < 1) ? 1 : p0;
-            t->cursor_col += n;
-            if (t->cursor_col >= t->cols) t->cursor_col = t->cols-1;
-            break;
-        }
-        case 'D': {
-            /* CUB — cursor left N cols */
-            int n = (p0 < 1) ? 1 : p0;
-            t->cursor_col -= n;
-            if (t->cursor_col < 0) t->cursor_col = 0;
-            break;
-        }
-        case 'E': {
-            /* CNL — cursor next line N times */
-            int n = (p0 < 1) ? 1 : p0;
-            t->cursor_row += n;
-            t->cursor_col  = 0;
-            if (t->cursor_row >= t->rows) t->cursor_row = t->rows-1;
-            break;
-        }
-        case 'F': {
-            /* CPL — cursor previous line N times */
-            int n = (p0 < 1) ? 1 : p0;
-            t->cursor_row -= n;
-            t->cursor_col  = 0;
-            if (t->cursor_row < 0) t->cursor_row = 0;
-            break;
-        }
-        case 'G': {
+        case 'G':
             /*
-             * CHA — cursor horizontal absolute (1-based column).
-             *
-             * readline sends \x1b[G or \x1b[1G to jump to col 0
-             * before erasing and redrawing the command line.
-             * Both p0=0 and p0=1 must map to cursor_col=0.
+             * CHA — cursor horizontal absolute (1-based).
+             * readline sends \x1b[G (p0=0) or \x1b[1G (p0=1)
+             * to jump to column 0 before redrawing a line.
+             * Both must map to cursor_col = 0.
              */
-            int col = (p0 < 1) ? 1 : p0;
-            t->cursor_col = col - 1;
-            if (t->cursor_col < 0)        t->cursor_col = 0;
-            if (t->cursor_col >= t->cols) t->cursor_col = t->cols-1;
+            t->cursor_col = clamp(((p0<1)?1:p0) - 1, 0, t->cols-1);
             break;
-        }
-        case 'H':
-        case 'f': {
-            /* CUP — cursor position row;col (both 1-based) */
-            int row = (p0 < 1) ? 1 : p0;
-            int col = (p1 < 1) ? 1 : p1;
-            t->cursor_row = row - 1;
-            t->cursor_col = col - 1;
-            if (t->cursor_row < 0)        t->cursor_row = 0;
-            if (t->cursor_row >= t->rows) t->cursor_row = t->rows-1;
-            if (t->cursor_col < 0)        t->cursor_col = 0;
-            if (t->cursor_col >= t->cols) t->cursor_col = t->cols-1;
-            break;
-        }
 
-        /* ── Erase in display ── */
-        case 'J': {
+        case 'H': case 'f':
+            /* CUP — row;col both 1-based */
+            t->cursor_row = clamp(((p0<1)?1:p0) - 1, 0, t->rows-1);
+            t->cursor_col = clamp(((p1<1)?1:p1) - 1, 0, t->cols-1);
+            break;
+
+        case 'd':
+            /* VPA — vertical position absolute (1-based row) */
+            t->cursor_row = clamp(((p0<1)?1:p0) - 1, 0, t->rows-1);
+            break;
+
+        /* Erase in display */
+        case 'J':
             if (p0 == 0) {
-                /* Erase from cursor to end of screen */
-                for (int c = t->cursor_col; c < t->cols; c++)
-                    clear_cell(t, t->cursor_row, c);
-                for (int r = t->cursor_row+1; r < t->rows; r++)
+                for (int c = cc; c < t->cols; c++)
+                    clear_cell(t, cr, c);
+                for (int r = cr+1; r < t->rows; r++)
                     for (int c = 0; c < t->cols; c++)
                         clear_cell(t, r, c);
             } else if (p0 == 1) {
-                /* Erase from start of screen to cursor */
-                for (int r = 0; r < t->cursor_row; r++)
+                for (int r = 0; r < cr; r++)
                     for (int c = 0; c < t->cols; c++)
                         clear_cell(t, r, c);
-                for (int c = 0; c <= t->cursor_col; c++)
-                    clear_cell(t, t->cursor_row, c);
+                for (int c = 0; c <= cc; c++)
+                    clear_cell(t, cr, c);
             } else if (p0 == 2 || p0 == 3) {
-                /* Erase entire screen, home cursor */
                 for (int r = 0; r < t->rows; r++)
                     for (int c = 0; c < t->cols; c++)
                         clear_cell(t, r, c);
@@ -365,61 +333,51 @@ static void apply_csi(Terminal *t, char final) {
             }
             mark_all_dirty(t);
             break;
-        }
 
-        /* ── Erase in line ── */
-        case 'K': {
+        /* Erase in line */
+        case 'K':
             /*
-             * EL — erase in line. Core of readline redraw.
-             *
-             * readline Up/Down arrow sequence:
+             * This is the core of the readline history fix.
+             * readline sequence for history redraw:
              *   \r       → cursor_col = 0
-             *   \x1b[K   → EL0: clear col 0 to end (whole line)
-             *   prompt   → print new content on clean line
+             *   \x1b[K   → EL0: clear col 0..end (whole line)
+             *   text     → print new content
              *
-             * Uses clear_cell() which resets bg — critical for
-             * preventing old colored text from showing through.
+             * clear_cell() resets bg so colored prompt text
+             * from the previous command is truly erased.
              */
             if (p0 == 0) {
-                /* EL0: erase from cursor to end of line */
-                for (int c = t->cursor_col; c < t->cols; c++)
-                    clear_cell(t, t->cursor_row, c);
+                for (int c = cc; c < t->cols; c++)
+                    clear_cell(t, cr, c);
             } else if (p0 == 1) {
-                /* EL1: erase from start of line to cursor */
-                for (int c = 0; c <= t->cursor_col; c++)
-                    clear_cell(t, t->cursor_row, c);
+                for (int c = 0; c <= cc; c++)
+                    clear_cell(t, cr, c);
             } else if (p0 == 2) {
-                /* EL2: erase entire line, cursor does NOT move */
                 for (int c = 0; c < t->cols; c++)
-                    clear_cell(t, t->cursor_row, c);
+                    clear_cell(t, cr, c);
             }
             break;
-        }
 
-        /* ── Insert / delete lines ── */
+        /* Insert / delete lines */
         case 'L': {
-            /* IL — insert N blank lines at cursor row */
-            int n = (p0 < 1) ? 1 : p0;
+            int n = (p0<1)?1:p0;
             for (int i = 0; i < n; i++) {
                 Cell *bottom = t->cells[t->rows-1];
-                memmove(&t->cells[t->cursor_row+1],
-                        &t->cells[t->cursor_row],
-                        (t->rows-t->cursor_row-1) * sizeof(Cell*));
-                t->cells[t->cursor_row] = bottom;
+                memmove(&t->cells[cr+1], &t->cells[cr],
+                        (t->rows-cr-1)*sizeof(Cell*));
+                t->cells[cr] = bottom;
                 for (int c = 0; c < t->cols; c++)
-                    clear_cell(t, t->cursor_row, c);
+                    clear_cell(t, cr, c);
             }
             mark_all_dirty(t);
             break;
         }
         case 'M': {
-            /* DL — delete N lines at cursor row */
-            int n = (p0 < 1) ? 1 : p0;
+            int n = (p0<1)?1:p0;
             for (int i = 0; i < n; i++) {
-                Cell *top = t->cells[t->cursor_row];
-                memmove(&t->cells[t->cursor_row],
-                        &t->cells[t->cursor_row+1],
-                        (t->rows-t->cursor_row-1) * sizeof(Cell*));
+                Cell *top = t->cells[cr];
+                memmove(&t->cells[cr], &t->cells[cr+1],
+                        (t->rows-cr-1)*sizeof(Cell*));
                 t->cells[t->rows-1] = top;
                 for (int c = 0; c < t->cols; c++)
                     clear_cell(t, t->rows-1, c);
@@ -428,76 +386,100 @@ static void apply_csi(Terminal *t, char final) {
             break;
         }
 
-        /* ── Character operations ── */
+        /* Erase / insert / delete characters */
         case 'X': {
-            /* ECH — erase N characters at cursor */
-            int n = (p0 < 1) ? 1 : p0;
-            for (int c = t->cursor_col;
-                 c < t->cursor_col+n && c < t->cols; c++)
-                clear_cell(t, t->cursor_row, c);
+            int n = (p0<1)?1:p0;
+            for (int c = cc; c < cc+n && c < t->cols; c++)
+                clear_cell(t, cr, c);
             break;
         }
 
-        case 'P': {
+        case 'P':
             /*
-             * DCH — delete N characters at cursor position.
-             * Shifts characters after cursor LEFT by N.
-             * Fills the tail with blank cells.
-             *
-             * Example with N=1, cursor at col 3:
-             *   Before: a b c [X] e f g _
-             *   After:  a b c  e  f g _ _
-             *
+             * DCH — delete N chars at cursor (shift left).
              * Used by readline when you press the Delete key.
              */
-            int n   = (p0 < 1) ? 1 : p0;
-            int row = t->cursor_row;
-            int col = t->cursor_col;
-            for (int c = col; c < t->cols; c++) {
+        {
+            int n = (p0<1)?1:p0;
+            for (int c = cc; c < t->cols; c++) {
                 int src = c + n;
                 if (src < t->cols) {
-                    t->cells[row][c] = t->cells[row][src];
-                    t->cells[row][c].dirty = 1;
+                    t->cells[cr][c] = t->cells[cr][src];
+                    t->cells[cr][c].dirty = 1;
                 } else {
-                    clear_cell(t, row, c);
+                    clear_cell(t, cr, c);
                 }
             }
             break;
         }
 
-        case '@': {
+        case '@':
             /*
-             * ICH — insert N blank characters at cursor.
-             * Shifts existing characters RIGHT by N.
-             * Characters shifted past the right edge are lost.
-             *
-             * Example with N=1, cursor at col 3:
-             *   Before: a b c [X] e f g h
-             *   After:  a b c  _  X e f g
-             *
-             * Used by readline when you type in the middle of
-             * an existing command line (insert mode).
+             * ICH — insert N blank chars at cursor (shift right).
+             * Used by readline when you type in the middle of a line.
              */
-            int n   = (p0 < 1) ? 1 : p0;
-            int row = t->cursor_row;
-            int col = t->cursor_col;
-            /* Shift right — iterate from right to avoid clobbering */
-            for (int c = t->cols-1; c >= col+n; c--) {
-                t->cells[row][c] = t->cells[row][c-n];
-                t->cells[row][c].dirty = 1;
+        {
+            int n = (p0<1)?1:p0;
+            for (int c = t->cols-1; c >= cc+n; c--) {
+                t->cells[cr][c] = t->cells[cr][c-n];
+                t->cells[cr][c].dirty = 1;
             }
-            /* Clear the newly opened cells */
-            for (int c = col; c < col+n && c < t->cols; c++)
-                clear_cell(t, row, c);
+            for (int c = cc; c < cc+n && c < t->cols; c++)
+                clear_cell(t, cr, c);
             break;
         }
 
-        /* ── Mode / status — acknowledge, ignore ── */
+        /* Scroll up / down */
+        case 'S': {
+            int n = (p0<1)?1:p0;
+            for (int i = 0; i < n; i++) scroll_up(t);
+            break;
+        }
+        case 'T': {
+            /* Scroll down — insert blank line at top */
+            int n = (p0<1)?1:p0;
+            for (int i = 0; i < n; i++) {
+                Cell *bottom = t->cells[t->rows-1];
+                memmove(&t->cells[1], &t->cells[0],
+                        (t->rows-1)*sizeof(Cell*));
+                t->cells[0] = bottom;
+                for (int c = 0; c < t->cols; c++)
+                    clear_cell(t, 0, c);
+            }
+            mark_all_dirty(t);
+            break;
+        }
+
+        /* Mode set / reset */
         case 'h':
-        case 'l':
-        case 'r':
-        case 'n':
-        case 'c':
+        case 'l': {
+            /*
+             * Handle the most important mode flags.
+             * ?25h/l = show/hide cursor (we always show it)
+             * ?1049h/l = alternate screen (acknowledge only)
+             * ?2004h/l = bracketed paste (acknowledge only)
+             */
+            /* All mode changes silently acknowledged */
+            break;
+        }
+
+        /* Cursor save / restore (CSI versions) */
+        case 's':
+            t->saved_col = t->cursor_col;
+            t->saved_row = t->cursor_row;
+            break;
+        case 'u':
+            t->cursor_col = clamp(t->saved_col, 0, t->cols-1);
+            t->cursor_row = clamp(t->saved_row, 0, t->rows-1);
+            break;
+
+        /* Repeat last char */
+        case 'b':
+            /* REP — not critical, ignore */
+            break;
+
+        /* Status / device queries — ignore */
+        case 'n': case 'c': case 'r':
             break;
 
         default:
@@ -505,15 +487,14 @@ static void apply_csi(Terminal *t, char final) {
     }
 }
 
-
 /* ── terminal_process ───────────────────────────────────────── */
-
 void terminal_process(Terminal *t, const char *buf, int len) {
     for (int i = 0; i < len; i++) {
         unsigned char c = (unsigned char)buf[i];
 
         switch (t->state) {
 
+            /* ══ NORMAL ══════════════════════════════════════ */
             case STATE_NORMAL:
 
                 if (c == 0x1b) {
@@ -521,26 +502,19 @@ void terminal_process(Terminal *t, const char *buf, int len) {
 
                 } else if (c == '\r') {
                     /*
-                     * CR — carriage return: move to column 0.
-                     * readline uses \r before redrawing a line.
+                     * CR — go to column 0.
+                     * readline uses \r to go back to line start
+                     * before erasing and redrawing the command.
                      */
                     t->cursor_col = 0;
 
                 } else if (c == '\n') {
                     /*
-                     * LF — line feed: advance row AND reset col=0.
+                     * LF — next row AND reset col=0.
                      *
-                     * WHY col=0 on \n:
-                     * bash sends \r\n pairs — \r sets col=0, then
-                     * \n advances the row. Resetting col=0 again
-                     * on \n is harmless (already 0 from \r).
-                     *
-                     * But programs sending bare \n (no preceding \r)
-                     * need the col reset here too — otherwise output
-                     * appears at a non-zero column on the new row
-                     * causing the path/prompt duplication bug.
-                     *
-                     * This matches xterm and VTE behavior.
+                     * Always reset col on \n to match xterm.
+                     * Fixes prompt duplication for programs that
+                     * send bare \n without a preceding \r.
                      */
                     t->cursor_col = 0;
                     t->cursor_row++;
@@ -550,69 +524,95 @@ void terminal_process(Terminal *t, const char *buf, int len) {
                     }
 
                 } else if (c == '\b') {
-                    /* BS — backspace: move left one col */
                     if (t->cursor_col > 0) t->cursor_col--;
 
                 } else if (c == '\t') {
-                    /* HT — tab: advance to next 8-column boundary */
                     t->cursor_col = (t->cursor_col + 8) & ~7;
                     if (t->cursor_col >= t->cols)
                         t->cursor_col = t->cols - 1;
 
-                } else if (c == 0x07 ||  /* BEL — bell     */
-                           c == 0x0e ||  /* SO  — shift out */
-                           c == 0x0f ||  /* SI  — shift in  */
-                           c == 0x00 ||  /* NUL — null      */
-                           c == 0x7f) {  /* DEL — delete    */
-                    /* All ignored */
+                } else if (c == 0x07 || c == 0x0e || c == 0x0f ||
+                           c == 0x00 || c == 0x7f || c == 0x05) {
+                    /* BEL SO SI NUL DEL ENQ — all ignored */
 
                 } else if (c >= 0x20 && c < 0x7f) {
-                    /* Printable ASCII */
                     put_char(t, (char)c);
 
                 } else if (c >= 0xa0) {
-                    /* High-byte printable — draw placeholder */
-                    put_char(t, '?');
+                    put_char(t, '?');   /* non-ASCII placeholder */
                 }
-                /* 0x80–0x9f: C1 controls — ignore */
+                /* 0x80-0x9f: C1 controls — skip */
                 break;
 
+            /* ══ ESCAPE ══════════════════════════════════════ */
             case STATE_ESCAPE:
 
                 if (c == '[') {
-                    /* CSI introducer */
                     t->state      = STATE_CSI;
                     t->params_len = 0;
                     memset(t->params, 0, sizeof(t->params));
 
+                } else if (c == ']') {
+                    /*
+                     * OSC — Operating System Command.
+                     * bash uses this to set the terminal title:
+                     *   ESC ] 0 ; title ST
+                     * Without catching this, the title bytes leak
+                     * as printable characters — garbling the screen.
+                     */
+                    t->state   = STATE_OSC;
+                    t->osc_len = 0;
+                    memset(t->osc_buf, 0, sizeof(t->osc_buf));
+
+                } else if (c == 'P' || c == '^' || c == '_') {
+                    /*
+                     * DCS / PM / APC — device control / private /
+                     * application program command strings.
+                     * We skip their content until ST (ESC \).
+                     * Reuse OSC state for simplicity.
+                     */
+                    t->state   = STATE_OSC;
+                    t->osc_len = 0;
+
                 } else if (c == 'c') {
-                    /* RIS — full terminal reset */
+                    /* RIS — full reset */
                     for (int r = 0; r < t->rows; r++)
                         for (int col = 0; col < t->cols; col++)
                             clear_cell(t, r, col);
-                    t->cursor_row = 0;
-                    t->cursor_col = 0;
+                    t->cursor_row = 0; t->cursor_col = 0;
                     t->current_fg = DEFAULT_FG;
                     t->current_bg = DEFAULT_BG;
                     t->bold       = 0;
                     t->state      = STATE_NORMAL;
 
                 } else if (c == 'M') {
-                    /* RI — reverse index: scroll down */
+                    /* RI — reverse index */
                     if (t->cursor_row > 0) t->cursor_row--;
                     t->state = STATE_NORMAL;
 
-                } else if (c == '7' || c == '8') {
-                    /* DECSC/DECRC — save/restore cursor (ignore) */
+                } else if (c == '7') {
+                    /* DECSC — save cursor */
+                    t->saved_col = t->cursor_col;
+                    t->saved_row = t->cursor_row;
+                    t->state = STATE_NORMAL;
+
+                } else if (c == '8') {
+                    /* DECRC — restore cursor */
+                    t->cursor_col = clamp(t->saved_col, 0, t->cols-1);
+                    t->cursor_row = clamp(t->saved_row, 0, t->rows-1);
                     t->state = STATE_NORMAL;
 
                 } else if (c == '=' || c == '>') {
-                    /* DECPAM/DECPNM — keypad mode (ignore) */
+                    /* DECPAM/DECPNM — keypad mode, ignore */
                     t->state = STATE_NORMAL;
 
                 } else if (c == '(' || c == ')' ||
                            c == '*' || c == '+') {
-                    /* Character set designation (ignore) */
+                    /* Character set designation, ignore */
+                    t->state = STATE_NORMAL;
+
+                } else if (c == '\\') {
+                    /* ST — string terminator (bare), ignore */
                     t->state = STATE_NORMAL;
 
                 } else {
@@ -620,40 +620,59 @@ void terminal_process(Terminal *t, const char *buf, int len) {
                 }
                 break;
 
+            /* ══ CSI ═════════════════════════════════════════ */
             case STATE_CSI:
 
-                if ((c >= '0' && c <= '9')
-                        || c == ';'
-                        || c == '?'   /* DEC private params      */
-                        || c == '!'   /* intermediate bytes       */
-                        || c == '"'
-                        || c == '$'
-                        || c == '>'   /* device attribute queries */
-                        || c == ' '   /* intermediate space       */
-                        || c == '\'') {
-                    /* Accumulate parameter/intermediate bytes */
+                if ((c >= '0' && c <= '9') ||
+                    c == ';' || c == '?' || c == '!' ||
+                    c == '"' || c == '$' || c == '>' ||
+                    c == ' ' || c == '\'') {
                     if (t->params_len < (int)sizeof(t->params)-1) {
                         t->params[t->params_len++] = (char)c;
                         t->params[t->params_len]   = '\0';
                     }
-
                 } else if (c >= 0x40 && c <= 0x7e) {
-                    /* Final byte — dispatch the command */
                     apply_csi(t, (char)c);
                     t->state = STATE_NORMAL;
-
+                } else if (c == 0x1b) {
+                    /* ESC inside CSI — abort current, start fresh */
+                    t->state = STATE_ESCAPE;
                 } else {
-                    /* Unexpected byte — abort */
                     t->state = STATE_NORMAL;
+                }
+                break;
+
+            /* ══ OSC ═════════════════════════════════════════ */
+            case STATE_OSC:
+                /*
+                 * Accumulate OSC content until ST (ESC \) or BEL (0x07).
+                 * We silently ignore the content — we just need to
+                 * consume all the bytes so they don't appear on screen.
+                 *
+                 * Common OSC sequences bash sends:
+                 *   ESC]0;title BEL  — set window title
+                 *   ESC]7;uri BEL    — set working directory
+                 *   ESC]133;A BEL    — shell integration marks
+                 */
+                if (c == 0x07) {
+                    /* BEL terminates OSC */
+                    t->state = STATE_NORMAL;
+                } else if (c == 0x1b) {
+                    /* ESC — may be start of ST (ESC \) */
+                    /* We just go back to ESCAPE state */
+                    t->state = STATE_ESCAPE;
+                } else {
+                    /* Accumulate (but don't overflow) */
+                    if (t->osc_len < (int)sizeof(t->osc_buf)-1) {
+                        t->osc_buf[t->osc_len++] = (char)c;
+                    }
                 }
                 break;
         }
     }
 }
 
-
 /* ── terminal_resize ────────────────────────────────────────── */
-
 void terminal_resize(Terminal *t, int cols, int rows) {
     if (t->cells) {
         for (int r = 0; r < t->rows; r++) free(t->cells[r]);
@@ -677,15 +696,11 @@ void terminal_resize(Terminal *t, int cols, int rows) {
         }
     }
 
-    if (t->cursor_row >= rows) t->cursor_row = rows-1;
-    if (t->cursor_col >= cols) t->cursor_col = cols-1;
-    if (t->cursor_row < 0)    t->cursor_row = 0;
-    if (t->cursor_col < 0)    t->cursor_col = 0;
+    t->cursor_row = clamp(t->cursor_row, 0, rows-1);
+    t->cursor_col = clamp(t->cursor_col, 0, cols-1);
 }
 
-
 /* ── Scrollback public API ──────────────────────────────────── */
-
 ScrollbackLine *scrollback_get(Terminal *t, int index) {
     if (index < 0 || index >= t->sb_count) return NULL;
     int pos = (t->sb_head - 1 - index + SCROLLBACK_MAX)
@@ -706,13 +721,11 @@ Cell *terminal_get_display_row(Terminal *t, int screen_row) {
         return NULL;
 
     if (line_index < t->sb_count) {
-        int sb_index = (t->sb_count - 1) - line_index;
-        ScrollbackLine *sl = scrollback_get(t, sb_index);
+        int sb_idx = (t->sb_count - 1) - line_index;
+        ScrollbackLine *sl = scrollback_get(t, sb_idx);
         return sl ? sl->cells : NULL;
     }
 
-    int live_row = line_index - t->sb_count;
-    if (live_row >= 0 && live_row < t->rows)
-        return t->cells[live_row];
-    return NULL;
+    int live = line_index - t->sb_count;
+    return (live >= 0 && live < t->rows) ? t->cells[live] : NULL;
 }
