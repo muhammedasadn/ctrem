@@ -1,18 +1,11 @@
 /*
- * main.c — cterm final version.
+ * main.c — cterm entry point.
  *
- * Module 11: Dirty-cell performance optimization.
- *   render_pane_tree() now checks cell->dirty before drawing.
- *   Only cells that actually changed get redrawn each frame.
- *   An idle terminal drops from thousands of SDL draw calls
- *   per frame to near zero. All dirty flags are cleared after
- *   each render pass.
- *
- * Module 12: Config file support.
- *   config_load() reads ~/.config/cterm/cterm.conf at startup.
- *   Font path, font size, window size, colors, shell, scrollback
- *   all come from the config. A default file is auto-created if
- *   none exists.
+ * Features added:
+ *   F11          — toggle fullscreen
+ *   Alt+Enter    — toggle fullscreen (alternative)
+ *   Window resize — drag edges or maximize via window manager
+ *   All panes resize automatically when window changes size
  */
 
 #ifndef _GNU_SOURCE
@@ -28,38 +21,17 @@
 #include "pane.h"
 #include "ansi.h"
 #include "tools.h"
-#include "config.h"
 
 
 /* ── render_pane_tree ───────────────────────────────────────── */
 
-/*
- * Renders all leaf panes in the tree.
- *
- * Module 11 optimization — dirty cell tracking:
- *   Before this change: every cell was redrawn every frame.
- *   After this change:  only cells with dirty=1 are redrawn.
- *
- * How it works:
- *   - ansi.c sets cell->dirty = 1 whenever a cell changes.
- *   - We check dirty before drawing background + glyph.
- *   - After drawing, we set dirty = 0.
- *   - Next frame, only cells changed by PTY output are dirty.
- *
- * On an idle terminal: 0 cell redraws per frame.
- * On active output:    only the changed cells redraw.
- * On full clear:       all cells redraw once, then settle.
- *
- * Exception: the cursor cell is always redrawn (blink state
- * changes every 500ms regardless of cell content).
- */
 static void render_pane_tree(Pane *p, SDL_Renderer *renderer,
-                              Font *font, const Config *cfg) {
+                              Font *font) {
     if (!p) return;
 
     if (p->type != PANE_LEAF) {
-        render_pane_tree(p->first,  renderer, font, cfg);
-        render_pane_tree(p->second, renderer, font, cfg);
+        render_pane_tree(p->first,  renderer, font);
+        render_pane_tree(p->second, renderer, font);
         return;
     }
 
@@ -68,19 +40,16 @@ static void render_pane_tree(Pane *p, SDL_Renderer *renderer,
 
     if (r.w < font->cell_width || r.h < font->cell_height) return;
 
-    /* Recalculate grid from pixel rect */
     int pcols = r.w / font->cell_width;
     int prows = r.h / font->cell_height;
     if (pcols < 1) pcols = 1;
     if (prows < 1) prows = 1;
 
-    /* Resize if pane dimensions changed */
     if (pcols != term->cols || prows != term->rows) {
         terminal_resize(term, pcols, prows);
         pty_resize(&p->pty, pcols, prows);
     }
 
-    /* ── Draw dirty cells only ── */
     for (int row = 0; row < term->rows; row++) {
         Cell *display_row = terminal_get_display_row(term, row);
 
@@ -91,17 +60,9 @@ static void render_pane_tree(Pane *p, SDL_Renderer *renderer,
             if (x + font->cell_width  > r.x + r.w) continue;
             if (y + font->cell_height > r.y + r.h) continue;
 
-            /* ── Dirty check — Module 11 ── */
-            /*
-             * If this cell hasn't changed since last frame,
-             * skip it entirely. The GPU still holds the correct
-             * pixels from the previous render.
-             */
-            if (display_row && !display_row[col].dirty) continue;
-
-            Uint8 bg_r = cfg->bg_r, bg_g = cfg->bg_g, bg_b = cfg->bg_b;
-            Uint8 fg_r = cfg->fg_r, fg_g = cfg->fg_g, fg_b = cfg->fg_b;
-            char  ch   = ' ';
+            Uint8 bg_r=0, bg_g=0, bg_b=0;
+            Uint8 fg_r=200, fg_g=200, fg_b=200;
+            char ch = ' ';
 
             if (display_row) {
                 ch   = display_row[col].ch;
@@ -113,68 +74,37 @@ static void render_pane_tree(Pane *p, SDL_Renderer *renderer,
                 bg_b = display_row[col].bg.b;
             }
 
-            /* Draw background */
             SDL_SetRenderDrawColor(renderer, bg_r, bg_g, bg_b, 255);
             SDL_Rect bg_rect = {x, y, font->cell_width, font->cell_height};
             SDL_RenderFillRect(renderer, &bg_rect);
 
-            /* Draw character glyph */
-            if (ch != ' ' && ch != '\0') {
-                font_draw_char(font, renderer, ch, x, y,
-                               fg_r, fg_g, fg_b);
-            }
-
-            /* Clear dirty flag — cell is now up to date */
-            if (display_row) display_row[col].dirty = 0;
+            if (ch != ' ' && ch != '\0')
+                font_draw_char(font, renderer, ch, x, y, fg_r, fg_g, fg_b);
         }
     }
 
-    /* ── Cursor ── */
-    /*
-     * Always redraw the cursor cell regardless of dirty state.
-     * The cursor blinks — its visual state changes every
-     * cfg->cursor_blink_ms milliseconds even if the cell
-     * content is unchanged.
-     *
-     * We also re-dirty the cursor cell so it gets redrawn
-     * next frame (for the blink-off state).
-     */
+    /* Blinking cursor — focused pane, live view */
     if (p->focused && term->scroll_offset == 0) {
-        int cx = r.x + term->cursor_col * font->cell_width;
-        int cy = r.y + term->cursor_row * font->cell_height;
-
-        if (cx + font->cell_width  <= r.x + r.w &&
-            cy + font->cell_height <= r.y + r.h) {
-
-            int blink_ms = cfg->cursor_blink_ms > 0
-                           ? cfg->cursor_blink_ms : 500;
-            Uint32 ticks = SDL_GetTicks();
-
-            if (cfg->cursor_blink_ms == 0 ||
-                (ticks / (Uint32)blink_ms) % 2 == 0) {
-                SDL_SetRenderDrawColor(renderer, 220, 220, 220, 200);
-                SDL_Rect cur = {cx, cy,
-                                font->cell_width, font->cell_height};
-                SDL_RenderFillRect(renderer, &cur);
-            }
-
-            /* Keep cursor cell dirty so blink redraws next frame */
-            if (term->cursor_row < term->rows &&
-                term->cursor_col < term->cols) {
-                term->cells[term->cursor_row][term->cursor_col].dirty = 1;
-            }
+        Uint32 ticks = SDL_GetTicks();
+        if ((ticks / 500) % 2 == 0) {
+            SDL_SetRenderDrawColor(renderer, 220, 220, 220, 200);
+            SDL_Rect cur = {
+                r.x + term->cursor_col * font->cell_width,
+                r.y + term->cursor_row * font->cell_height,
+                font->cell_width, font->cell_height
+            };
+            SDL_RenderFillRect(renderer, &cur);
         }
     }
 
-    /* ── Scroll indicator ── */
+    /* Scroll indicator — focused pane, scrolled view */
     if (p->focused && term->scroll_offset > 0) {
         SDL_SetRenderDrawColor(renderer, 80, 140, 255, 220);
         SDL_Rect top_line = {r.x, r.y, r.w, 2};
         SDL_RenderFillRect(renderer, &top_line);
 
         if (term->sb_count > 0) {
-            float ratio = (float)term->scroll_offset
-                          / (float)term->sb_count;
+            float ratio = (float)term->scroll_offset / (float)term->sb_count;
             int bar_h   = r.h / 8;
             int bar_y   = r.y + (int)((r.h - bar_h) * (1.0f - ratio));
             SDL_SetRenderDrawColor(renderer, 80, 140, 255, 160);
@@ -190,39 +120,29 @@ static void render_pane_tree(Pane *p, SDL_Renderer *renderer,
  * ════════════════════════════════════════════════════════════ */
 
 int main(void) {
-    /* ── Module 12: Load config first ────────────────────────── */
-    Config cfg;
-    config_load(&cfg);
-
     Window     win;
     Font       font;
     TabManager tm;
     ToolManager tools;
 
-    /* ── Window (using config dimensions) ───────────────────── */
-    if (window_init(&win, cfg.win_width, cfg.win_height) != 0) {
+    /* ── Window ── */
+    if (window_init(&win, 900, 560) != 0) {
         fprintf(stderr, "Failed to create window.\n");
         return 1;
     }
 
-    SDL_SetWindowTitle(win.window, "cterm");
-
-    /* ── Font (using config font path + size) ───────────────── */
-    if (font_init(&font, win.renderer,
-                  cfg.font_path, cfg.font_size) != 0) {
-        fprintf(stderr,
-                "Failed to load font: %s\n"
-                "Edit ~/.config/cterm/cterm.conf to fix font_path\n",
-                cfg.font_path);
+    /* ── Font ── */
+    if (font_init(&font, win.renderer, "../assets/font.ttf", 16) != 0) {
+        fprintf(stderr, "Failed to load font.\n");
         window_destroy(&win);
         return 1;
     }
 
-    /* ── Grid dimensions ─────────────────────────────────────── */
+    /* ── Grid size ── */
     int cols = win.width  / font.cell_width;
-    int rows = (win.height - cfg.tab_bar_height) / font.cell_height;
+    int rows = (win.height - TAB_BAR_HEIGHT) / font.cell_height;
 
-    /* ── Tabs ────────────────────────────────────────────────── */
+    /* ── Tabs ── */
     if (tabs_init(&tm, cols, rows) != 0) {
         fprintf(stderr, "Failed to init tabs.\n");
         font_destroy(&font);
@@ -230,55 +150,50 @@ int main(void) {
         return 1;
     }
 
-    /* ── Tools ───────────────────────────────────────────────── */
+    /* ── Tools ── */
     tools_init(&tools);
 
     char read_buf[4096];
     int  running = 1;
 
-    /*
-     * Initial full-dirty pass.
-     * On the very first frame every cell must be drawn even
-     * though no PTY output has arrived yet — we need to paint
-     * the background. We mark all cells dirty at startup.
-     * After the first render they settle to clean.
-     */
-
-    /* ════════════════════════════════════════════════════════════
+    /* ════════════════════════════════════════════════════════
      * MAIN LOOP
-     * ════════════════════════════════════════════════════════════ */
+     * ════════════════════════════════════════════════════════ */
     while (running) {
 
         Tab *tab = tabs_get_active(&tm);
 
-        /* ── Events ──────────────────────────────────────────── */
+        /* ── Events ── */
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
 
+            /* Quit */
             if (event.type == SDL_QUIT) {
-                running = 0;
+                running = 0; continue;
+            }
+
+            /* Window resize / maximize / restore */
+            if (event.type == SDL_WINDOWEVENT) {
+                if (event.window.event == SDL_WINDOWEVENT_RESIZED ||
+                    event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                    SDL_GetWindowSize(win.window, &win.width, &win.height);
+                    cols = win.width  / font.cell_width;
+                    rows = (win.height - TAB_BAR_HEIGHT) / font.cell_height;
+                    if (cols < 1) cols = 1;
+                    if (rows < 1) rows = 1;
+                    /* Pane terminals resize automatically in render loop */
+                }
                 continue;
             }
 
-            if (event.type == SDL_WINDOWEVENT &&
-                event.window.event == SDL_WINDOWEVENT_RESIZED) {
-                win.width  = event.window.data1;
-                win.height = event.window.data2;
-                cols = win.width  / font.cell_width;
-                rows = (win.height - cfg.tab_bar_height)
-                       / font.cell_height;
-                continue;
-            }
-
+            /* Mouse click */
             if (event.type == SDL_MOUSEBUTTONDOWN &&
                 event.button.button == SDL_BUTTON_LEFT) {
                 if (tools.launcher.visible) {
-                    tools_launcher_close(&tools);
-                    continue;
+                    tools_launcher_close(&tools); continue;
                 }
-                int mx = event.button.x;
-                int my = event.button.y;
-                if (my < cfg.tab_bar_height) {
+                int mx = event.button.x, my = event.button.y;
+                if (my < TAB_BAR_HEIGHT) {
                     if (tabs_handle_click(&tm, mx, my, cols, rows))
                         tab = tabs_get_active(&tm);
                 } else {
@@ -288,6 +203,7 @@ int main(void) {
                 continue;
             }
 
+            /* Mouse wheel — scrollback */
             if (event.type == SDL_MOUSEWHEEL) {
                 if (!tools.launcher.visible) {
                     Pane *fp = pane_get_focused(tab->root);
@@ -306,6 +222,7 @@ int main(void) {
                 continue;
             }
 
+            /* Text input */
             if (event.type == SDL_TEXTINPUT) {
                 if (tools.launcher.visible) {
                     tools_launcher_handle_text(&tools, event.text.text);
@@ -320,11 +237,13 @@ int main(void) {
                 continue;
             }
 
+            /* Key down */
             if (event.type == SDL_KEYDOWN) {
                 SDL_Keycode sym = event.key.keysym.sym;
                 SDL_Keymod  mod = SDL_GetModState();
                 int ctrl  = (mod & KMOD_CTRL)  != 0;
                 int shift = (mod & KMOD_SHIFT) != 0;
+                int alt   = (mod & KMOD_ALT)   != 0;
 
                 /* Launcher intercepts all keys when open */
                 if (tools.launcher.visible) {
@@ -334,56 +253,57 @@ int main(void) {
                     continue;
                 }
 
+                /* ── F11 or Alt+Enter — fullscreen toggle ── */
+                if (sym == SDLK_F11 ||
+                    (alt && sym == SDLK_RETURN)) {
+                    window_toggle_fullscreen(&win);
+                    SDL_GetWindowSize(win.window,
+                                      &win.width, &win.height);
+                    cols = win.width / font.cell_width;
+                    rows = (win.height - TAB_BAR_HEIGHT)
+                           / font.cell_height;
+                    continue;
+                }
+
                 /* ── Tab shortcuts ── */
                 if (ctrl && !shift && sym == SDLK_t) {
                     tabs_new(&tm, cols, rows);
-                    tab = tabs_get_active(&tm);
-                    continue;
+                    tab = tabs_get_active(&tm); continue;
                 }
                 if (ctrl && !shift && sym == SDLK_w) {
                     tabs_close(&tm, tm.active);
-                    tab = tabs_get_active(&tm);
-                    continue;
+                    tab = tabs_get_active(&tm); continue;
                 }
                 if (ctrl && !shift && sym == SDLK_TAB) {
-                    tabs_next(&tm);
-                    tab = tabs_get_active(&tm);
-                    continue;
+                    tabs_next(&tm); tab = tabs_get_active(&tm); continue;
                 }
                 if (ctrl && shift && sym == SDLK_TAB) {
-                    tabs_prev(&tm);
-                    tab = tabs_get_active(&tm);
-                    continue;
+                    tabs_prev(&tm); tab = tabs_get_active(&tm); continue;
                 }
-                if (ctrl && !shift &&
-                    sym >= SDLK_1 && sym <= SDLK_9) {
+                if (ctrl && !shift && sym >= SDLK_1 && sym <= SDLK_9) {
                     tabs_set_active(&tm, sym - SDLK_1);
-                    tab = tabs_get_active(&tm);
-                    continue;
+                    tab = tabs_get_active(&tm); continue;
                 }
 
                 /* ── Tool launcher ── */
                 if (ctrl && !shift && sym == SDLK_p) {
-                    tools_launcher_open(&tools);
-                    continue;
+                    tools_launcher_open(&tools); continue;
                 }
 
                 /* ── Pane shortcuts ── */
                 if (ctrl && shift && sym == SDLK_RIGHT) {
                     Pane *fp = pane_get_focused(tab->root);
                     if (fp) {
-                        Pane *n = pane_split(fp, PANE_SPLIT_H,
-                                             cols, rows);
-                        if (n != fp) tab->root = n;
+                        Pane *nw = pane_split(fp, PANE_SPLIT_H, cols, rows);
+                        if (nw != fp) tab->root = nw;
                     }
                     continue;
                 }
                 if (ctrl && shift && sym == SDLK_DOWN) {
                     Pane *fp = pane_get_focused(tab->root);
                     if (fp) {
-                        Pane *n = pane_split(fp, PANE_SPLIT_V,
-                                             cols, rows);
-                        if (n != fp) tab->root = n;
+                        Pane *nw = pane_split(fp, PANE_SPLIT_V, cols, rows);
+                        if (nw != fp) tab->root = nw;
                     }
                     continue;
                 }
@@ -396,60 +316,59 @@ int main(void) {
                     continue;
                 }
                 if (ctrl && shift && sym == SDLK_f) {
-                    pane_focus_next(tab->root);
-                    continue;
+                    pane_focus_next(tab->root); continue;
                 }
 
-                /* ── Generic Ctrl+letter → control char ── */
+                /* ── Generic Ctrl+letter → control byte ── */
                 if (ctrl && sym >= SDLK_a && sym <= SDLK_z) {
                     Pane *fp = pane_get_focused(tab->root);
                     if (fp) {
-                        char cc = (char)(sym - SDLK_a + 1);
-                        pty_write(&fp->pty, &cc, 1);
+                        char ctrl_char = (char)(sym - SDLK_a + 1);
+                        pty_write(&fp->pty, &ctrl_char, 1);
                     }
                     continue;
                 }
 
                 /* ── Terminal keys ── */
                 {
-                    Pane     *fp  = pane_get_focused(tab->root);
+                    Pane *fp = pane_get_focused(tab->root);
                     if (!fp) continue;
-                    PTY      *pty = &fp->pty;
-                    Terminal *t   = fp->term;
+                    PTY      *pty     = &fp->pty;
+                    Terminal *term_fp = fp->term;
 
                     switch (sym) {
                         case SDLK_RETURN:
-                            t->scroll_offset = 0;
-                            pty_write(pty, "\r", 1);      break;
+                            term_fp->scroll_offset = 0;
+                            pty_write(pty, "\r", 1); break;
                         case SDLK_BACKSPACE:
-                            pty_write(pty, "\x7f", 1);    break;
+                            pty_write(pty, "\x7f", 1); break;
                         case SDLK_TAB:
-                            pty_write(pty, "\t", 1);      break;
+                            pty_write(pty, "\t", 1); break;
                         case SDLK_ESCAPE:
-                            pty_write(pty, "\x1b", 1);    break;
+                            pty_write(pty, "\x1b", 1); break;
                         case SDLK_UP:
-                            pty_write(pty, "\x1b[A", 3);  break;
+                            pty_write(pty, "\x1b[A", 3); break;
                         case SDLK_DOWN:
-                            pty_write(pty, "\x1b[B", 3);  break;
+                            pty_write(pty, "\x1b[B", 3); break;
                         case SDLK_RIGHT:
-                            pty_write(pty, "\x1b[C", 3);  break;
+                            pty_write(pty, "\x1b[C", 3); break;
                         case SDLK_LEFT:
-                            pty_write(pty, "\x1b[D", 3);  break;
+                            pty_write(pty, "\x1b[D", 3); break;
                         case SDLK_HOME:
-                            pty_write(pty, "\x1b[H", 3);  break;
+                            pty_write(pty, "\x1b[H", 3); break;
                         case SDLK_END:
-                            pty_write(pty, "\x1b[F", 3);  break;
+                            pty_write(pty, "\x1b[F", 3); break;
                         case SDLK_DELETE:
                             pty_write(pty, "\x1b[3~", 4); break;
                         case SDLK_PAGEUP:
-                            t->scroll_offset += rows / 2;
-                            if (t->scroll_offset > t->sb_count)
-                                t->scroll_offset = t->sb_count;
+                            term_fp->scroll_offset += rows / 2;
+                            if (term_fp->scroll_offset > term_fp->sb_count)
+                                term_fp->scroll_offset = term_fp->sb_count;
                             break;
                         case SDLK_PAGEDOWN:
-                            t->scroll_offset -= rows / 2;
-                            if (t->scroll_offset < 0)
-                                t->scroll_offset = 0;
+                            term_fp->scroll_offset -= rows / 2;
+                            if (term_fp->scroll_offset < 0)
+                                term_fp->scroll_offset = 0;
                             break;
                         default: break;
                     }
@@ -459,28 +378,26 @@ int main(void) {
 
         } /* end SDL_PollEvent */
 
-        /* ── Read PTY output for all tabs ───────────────────── */
+
+        /* ── Read PTY output ── */
         for (int i = 0; i < tm.count; i++)
             pane_read_all(tm.tabs[i].root, read_buf, sizeof(read_buf));
 
-        /* ── Render ──────────────────────────────────────────── */
+
+        /* ── Render ── */
         window_render_begin(&win);
 
         /* Tab bar */
         tabs_draw_bar(&tm, win.renderer, &font, win.width);
 
-        /* Pane layout */
+        /* Pane layout + render */
         tab = tabs_get_active(&tm);
         SDL_Rect terminal_area = {
-            0, cfg.tab_bar_height,
-            win.width, win.height - cfg.tab_bar_height
+            0, TAB_BAR_HEIGHT,
+            win.width, win.height - TAB_BAR_HEIGHT
         };
         pane_layout(tab->root, terminal_area);
-
-        /* Render panes (dirty cells only) */
-        render_pane_tree(tab->root, win.renderer, &font, &cfg);
-
-        /* Dividers + focus border */
+        render_pane_tree(tab->root, win.renderer, &font);
         pane_draw_dividers(tab->root, win.renderer);
 
         /* Tool launcher overlay */
@@ -492,7 +409,6 @@ int main(void) {
 
     } /* end main loop */
 
-    /* ── Cleanup ─────────────────────────────────────────────── */
     tabs_destroy(&tm);
     font_destroy(&font);
     window_destroy(&win);
