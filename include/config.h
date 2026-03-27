@@ -2,66 +2,82 @@
 #define CONFIG_H
 
 /*
- * config.h — Runtime configuration for cterm.
+ * config.h — User configuration for cterm.
  *
  * Reads ~/.config/cterm/cterm.conf at startup.
- * All settings have sensible defaults so the file is optional.
+ * Every setting has a sensible default so the file is optional.
  *
- * Example cterm.conf:
- *   font_path  = /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf
- *   font_size  = 16
- *   win_width  = 1000
- *   win_height = 600
- *   fg_color   = 200,200,200
- *   bg_color   = 0,0,0
- *   shell      = /bin/bash
- *   scrollback = 5000
- *   tab_width  = 140
+ * Config file format:
+ *   key = value
+ *   # lines starting with # are comments
+ *   blank lines are ignored
+ *
+ * Example ~/.config/cterm/cterm.conf:
+ *   font_path     = /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf
+ *   font_size     = 16
+ *   fg_color      = 200 200 200
+ *   bg_color      = 18 18 18
+ *   window_width  = 900
+ *   window_height = 560
+ *   scrollback    = 5000
  */
 
-#include <stdint.h>
+/* Maximum path length for font_path */
+#define CONFIG_PATH_MAX 512
 
-/* Maximum path length */
-#define CFG_PATH_MAX 512
-
+/*
+ * Config — all user-configurable settings.
+ * Populated by config_load() at startup.
+ * Access via the global g_config.
+ */
 typedef struct {
+
     /* Font */
-    char     font_path[CFG_PATH_MAX];
-    int      font_size;
+    char font_path[CONFIG_PATH_MAX]; /* path to .ttf file      */
+    int  font_size;                  /* pixels, e.g. 16        */
+
+    /* Colors — stored as R G B (0-255 each) */
+    int  fg_r, fg_g, fg_b;          /* default text color     */
+    int  bg_r, bg_g, bg_b;          /* background color       */
+    int  cursor_r, cursor_g, cursor_b; /* cursor color         */
 
     /* Window */
-    int      win_width;
-    int      win_height;
+    int  window_width;               /* initial width  pixels  */
+    int  window_height;              /* initial height pixels  */
+    int  start_fullscreen;           /* 1 = start fullscreen   */
 
-    /* Colors */
-    uint8_t  fg_r, fg_g, fg_b;
-    uint8_t  bg_r, bg_g, bg_b;
+    /* Terminal */
+    int  scrollback_lines;           /* max scrollback history */
+    int  font_antialiasing;          /* 1 = smooth (default)   */
 
-    /* Cursor blink interval in ms (0 = no blink) */
-    int      cursor_blink_ms;
-
-    /* Shell executable */
-    char     shell[CFG_PATH_MAX];
-
-    /* Scrollback lines */
-    int      scrollback_lines;
-
-    /* Tab bar */
-    int      tab_width;
-    int      tab_bar_height;
 } Config;
 
 /*
- * config_load — load config from ~/.config/cterm/cterm.conf.
- * If the file doesn't exist, writes a default config and uses it.
- * Always succeeds — missing or malformed lines use defaults.
+ * Global config instance.
+ * Declared here, defined in config.c.
+ * All modules access settings via g_config.font_size etc.
  */
-void config_load(Config *cfg);
+extern Config g_config;
 
 /*
- * config_save_default — write a default config file.
- * Called automatically by config_load if no file exists.
+ * config_load — read the config file and populate g_config.
+ * Sets all fields to defaults first, then applies the file.
+ * Safe to call even if the file doesn't exist.
+ *
+ * Call once at startup before any other module is initialized.
  */
-void config_save_default(const char *path, const Config *cfg);
+void config_load(void);
+
+/*
+ * config_save_default — write a default config file if none exists.
+ * Creates ~/.config/cterm/ directory if needed.
+ * Call after config_load() so the user gets a template to edit.
+ */
+void config_save_default(void);
+
+/*
+ * config_print — dump current settings to stdout for debugging.
+ */
+void config_print(void);
 
 #endif /* CONFIG_H */

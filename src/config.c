@@ -1,14 +1,15 @@
 /*
  * config.c — Configuration file loader for cterm.
  *
- * Format: key = value (one per line)
- * Lines starting with # are comments.
- * Unknown keys are silently ignored.
- * Malformed values fall back to the compiled-in default.
+ * Reads ~/.config/cterm/cterm.conf at startup.
+ * Creates a default config file if none exists.
  *
- * Config file location: ~/.config/cterm/cterm.conf
- * If it doesn't exist, we create it with default values
- * so the user has a template to edit.
+ * Parser is intentionally simple:
+ *   - One key = value pair per line
+ *   - Leading/trailing whitespace stripped
+ *   - Lines starting with # are comments
+ *   - Unknown keys are silently ignored
+ *   - Malformed values fall back to defaults
  */
 
 #ifndef _GNU_SOURCE
@@ -19,243 +20,267 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 #include <errno.h>
-#include <ctype.h>
 
+/* ── Global config instance ─────────────────────────────────── */
+Config g_config;
 
-/* ── Compiled-in defaults ───────────────────────────────────── */
+/* ── Default font search paths ──────────────────────────────── */
+/*
+ * We try several common font locations on Ubuntu/Debian.
+ * The first one that exists is used as the default.
+ */
+static const char *FONT_CANDIDATES[] = {
+    /* JetBrains Mono — best terminal font */
+    "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMonoNL-Regular.ttf",
+    "/usr/share/fonts/truetype/jetbrains/JetBrainsMono-Regular.ttf",
+    /* DejaVu — always present on Ubuntu */
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    /* Ubuntu Mono */
+    "/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf",
+    /* Liberation Mono — Red Hat/Fedora */
+    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    /* Courier New */
+    "/usr/share/fonts/truetype/msttcorefonts/cour.ttf",
+    /* Last resort — project assets folder */
+    "../assets/font.ttf",
+    NULL
+};
 
-static void set_defaults(Config *cfg) {
-    /* Font — try a common monospace font path */
-    strncpy(cfg->font_path,
-            "../assets/font.ttf",
-            CFG_PATH_MAX - 1);
-    cfg->font_size        = 16;
+/* ── set_defaults ───────────────────────────────────────────── */
+static void set_defaults(void) {
+    /* Font: search for best available */
+    g_config.font_path[0] = '\0';
+    for (int i = 0; FONT_CANDIDATES[i] != NULL; i++) {
+        if (access(FONT_CANDIDATES[i], R_OK) == 0) {
+            strncpy(g_config.font_path, FONT_CANDIDATES[i],
+                    CONFIG_PATH_MAX - 1);
+            break;
+        }
+    }
+    /* Absolute fallback */
+    if (g_config.font_path[0] == '\0') {
+        strncpy(g_config.font_path, "../assets/font.ttf",
+                CONFIG_PATH_MAX - 1);
+    }
+
+    g_config.font_size        = 16;
+    g_config.font_antialiasing = 1;
+
+    /* Colors */
+    g_config.fg_r = 200; g_config.fg_g = 200; g_config.fg_b = 200;
+    g_config.bg_r = 18;  g_config.bg_g = 18;  g_config.bg_b = 18;
+    g_config.cursor_r = 220; g_config.cursor_g = 220; g_config.cursor_b = 220;
 
     /* Window */
-    cfg->win_width        = 900;
-    cfg->win_height       = 550;
+    g_config.window_width    = 900;
+    g_config.window_height   = 560;
+    g_config.start_fullscreen = 0;
 
-    /* Colors: light gray text on black background */
-    cfg->fg_r = 200; cfg->fg_g = 200; cfg->fg_b = 200;
-    cfg->bg_r = 0;   cfg->bg_g = 0;   cfg->bg_b = 0;
-
-    /* Cursor blinks every 500ms */
-    cfg->cursor_blink_ms  = 500;
-
-    /* Shell */
-    strncpy(cfg->shell, "/bin/bash", CFG_PATH_MAX - 1);
-
-    /* Scrollback */
-    cfg->scrollback_lines = 5000;
-
-    /* Tab bar */
-    cfg->tab_width        = 140;
-    cfg->tab_bar_height   = 30;
+    /* Terminal */
+    g_config.scrollback_lines = 5000;
 }
 
-
-/* ── String helpers ─────────────────────────────────────────── */
-
-/* Trim leading and trailing whitespace in-place */
+/* ── trim ───────────────────────────────────────────────────── */
+/* Remove leading and trailing whitespace in-place */
 static char *trim(char *s) {
+    /* Leading */
     while (*s && isspace((unsigned char)*s)) s++;
+    if (*s == '\0') return s;
+    /* Trailing */
     char *end = s + strlen(s) - 1;
-    while (end > s && isspace((unsigned char)*end)) *end-- = '\0';
+    while (end > s && isspace((unsigned char)*end)) end--;
+    *(end + 1) = '\0';
     return s;
 }
 
+/* ── get_config_path ────────────────────────────────────────── */
+static void get_config_path(char *out, int size) {
+    const char *home = getenv("HOME");
+    if (!home) home = "/tmp";
+    snprintf(out, size, "%s/.config/cterm/cterm.conf", home);
+}
+
+/* ── get_config_dir ─────────────────────────────────────────── */
+static void get_config_dir(char *out, int size) {
+    const char *home = getenv("HOME");
+    if (!home) home = "/tmp";
+    snprintf(out, size, "%s/.config/cterm", home);
+}
+
+/* ── parse_line ─────────────────────────────────────────────── */
+static void parse_line(char *line) {
+    /* Skip comments and blank lines */
+    char *trimmed = trim(line);
+    if (*trimmed == '\0' || *trimmed == '#') return;
+
+    /* Split on '=' */
+    char *eq = strchr(trimmed, '=');
+    if (!eq) return;
+
+    *eq = '\0';
+    char *key = trim(trimmed);
+    char *val = trim(eq + 1);
+
+    if (!*key || !*val) return;
+
+    /* Match keys */
+    if (strcmp(key, "font_path") == 0) {
+        strncpy(g_config.font_path, val, CONFIG_PATH_MAX - 1);
+
+    } else if (strcmp(key, "font_size") == 0) {
+        int v = atoi(val);
+        if (v >= 6 && v <= 72) g_config.font_size = v;
+
+    } else if (strcmp(key, "font_antialiasing") == 0) {
+        g_config.font_antialiasing = atoi(val) ? 1 : 0;
+
+    } else if (strcmp(key, "fg_color") == 0) {
+        sscanf(val, "%d %d %d",
+               &g_config.fg_r, &g_config.fg_g, &g_config.fg_b);
+
+    } else if (strcmp(key, "bg_color") == 0) {
+        sscanf(val, "%d %d %d",
+               &g_config.bg_r, &g_config.bg_g, &g_config.bg_b);
+
+    } else if (strcmp(key, "cursor_color") == 0) {
+        sscanf(val, "%d %d %d",
+               &g_config.cursor_r,
+               &g_config.cursor_g,
+               &g_config.cursor_b);
+
+    } else if (strcmp(key, "window_width") == 0) {
+        int v = atoi(val);
+        if (v >= 200) g_config.window_width = v;
+
+    } else if (strcmp(key, "window_height") == 0) {
+        int v = atoi(val);
+        if (v >= 100) g_config.window_height = v;
+
+    } else if (strcmp(key, "start_fullscreen") == 0) {
+        g_config.start_fullscreen = atoi(val) ? 1 : 0;
+
+    } else if (strcmp(key, "scrollback") == 0) {
+        int v = atoi(val);
+        if (v >= 100 && v <= 50000)
+            g_config.scrollback_lines = v;
+    }
+    /* Unknown keys silently ignored */
+}
+
+/* ── config_load ────────────────────────────────────────────── */
+void config_load(void) {
+    /* Always start with safe defaults */
+    set_defaults();
+
+    char path[512];
+    get_config_path(path, sizeof(path));
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        /* No config file — use defaults and create one */
+        printf("config: no config file found, using defaults\n");
+        printf("config: creating default at %s\n", path);
+        config_save_default();
+        return;
+    }
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        /* Strip newline */
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        parse_line(line);
+    }
+
+    fclose(f);
+    printf("config: loaded from %s\n", path);
+}
 
 /* ── config_save_default ────────────────────────────────────── */
+void config_save_default(void) {
+    char dir[512];
+    get_config_dir(dir, sizeof(dir));
 
-void config_save_default(const char *path, const Config *cfg) {
+    /* Create directory if it doesn't exist */
+    struct stat st;
+    if (stat(dir, &st) != 0) {
+        /* Try creating ~/.config first, then ~/.config/cterm */
+        char parent[512];
+        const char *home = getenv("HOME");
+        if (!home) return;
+        snprintf(parent, sizeof(parent), "%s/.config", home);
+        mkdir(parent, 0755);
+        mkdir(dir, 0755);
+    }
+
+    char path[512];
+    get_config_path(path, sizeof(path));
+
+    /* Don't overwrite an existing file */
+    if (access(path, F_OK) == 0) return;
+
     FILE *f = fopen(path, "w");
     if (!f) {
-        fprintf(stderr, "config: cannot write default to %s: %s\n",
+        fprintf(stderr, "config: cannot write to %s: %s\n",
                 path, strerror(errno));
         return;
     }
 
     fprintf(f,
         "# cterm configuration file\n"
+        "# ~/.config/cterm/cterm.conf\n"
+        "#\n"
         "# Lines starting with # are comments.\n"
-        "# Restart cterm after editing.\n"
+        "# Edit and restart cterm to apply changes.\n"
         "\n"
-        "# Font settings\n"
-        "font_path  = %s\n"
+        "# ── Font ────────────────────────────────────────\n"
+        "# Path to a monospace .ttf font file.\n"
+        "# Leave commented to auto-detect.\n"
+        "# font_path = /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf\n"
         "font_size  = %d\n"
         "\n"
-        "# Window size (pixels)\n"
-        "win_width  = %d\n"
-        "win_height = %d\n"
+        "# ── Colors (R G B, each 0-255) ──────────────────\n"
+        "fg_color      = %d %d %d\n"
+        "bg_color      = %d %d %d\n"
+        "cursor_color  = %d %d %d\n"
         "\n"
-        "# Default foreground color (r,g,b  range 0-255)\n"
-        "fg_color   = %d,%d,%d\n"
+        "# ── Window ───────────────────────────────────────\n"
+        "window_width   = %d\n"
+        "window_height  = %d\n"
+        "# start_fullscreen = 0\n"
         "\n"
-        "# Default background color (r,g,b  range 0-255)\n"
-        "bg_color   = %d,%d,%d\n"
-        "\n"
-        "# Cursor blink interval in milliseconds (0 = no blink)\n"
-        "cursor_blink_ms = %d\n"
-        "\n"
-        "# Shell executable\n"
-        "shell      = %s\n"
-        "\n"
-        "# Scrollback buffer size (lines)\n"
-        "scrollback = %d\n"
-        "\n"
-        "# Tab bar settings\n"
-        "tab_width       = %d\n"
-        "tab_bar_height  = %d\n",
-        cfg->font_path, cfg->font_size,
-        cfg->win_width, cfg->win_height,
-        cfg->fg_r, cfg->fg_g, cfg->fg_b,
-        cfg->bg_r, cfg->bg_g, cfg->bg_b,
-        cfg->cursor_blink_ms,
-        cfg->shell,
-        cfg->scrollback_lines,
-        cfg->tab_width,
-        cfg->tab_bar_height
+        "# ── Terminal ─────────────────────────────────────\n"
+        "# Number of lines kept in scrollback history.\n"
+        "scrollback = %d\n",
+        g_config.font_size,
+        g_config.fg_r, g_config.fg_g, g_config.fg_b,
+        g_config.bg_r, g_config.bg_g, g_config.bg_b,
+        g_config.cursor_r, g_config.cursor_g, g_config.cursor_b,
+        g_config.window_width, g_config.window_height,
+        g_config.scrollback_lines
     );
 
     fclose(f);
-    printf("config: wrote default config to %s\n", path);
+    printf("config: default config written to %s\n", path);
 }
 
-
-/* ── config_load ────────────────────────────────────────────── */
-
-void config_load(Config *cfg) {
-    /* Start with compiled-in defaults */
-    set_defaults(cfg);
-
-    /* Build config directory path: ~/.config/cterm/ */
-    const char *home = getenv("HOME");
-    if (!home || home[0] == '\0') {
-        fprintf(stderr, "config: $HOME not set, using defaults\n");
-        return;
-    }
-
-    char dir_path[CFG_PATH_MAX];
-    snprintf(dir_path, sizeof(dir_path),
-             "%s/.config/cterm", home);
-
-    char file_path[CFG_PATH_MAX];
-    snprintf(file_path, sizeof(file_path),
-             "%s/cterm.conf", dir_path);
-
-    /* Create directory if it doesn't exist */
-    struct stat st;
-    if (stat(dir_path, &st) != 0) {
-        /*
-         * mkdir with 0755 = rwxr-xr-x permissions.
-         * Only the owner can write; others can read and execute.
-         */
-        if (mkdir(dir_path, 0755) != 0 && errno != EEXIST) {
-            fprintf(stderr, "config: cannot create %s: %s\n",
-                    dir_path, strerror(errno));
-            return;
-        }
-    }
-
-    /* If no config file exists, write a default and use it */
-    FILE *f = fopen(file_path, "r");
-    if (!f) {
-        config_save_default(file_path, cfg);
-        return;
-    }
-
-    printf("config: loading %s\n", file_path);
-
-    /* Parse each line */
-    char line[512];
-    int  line_num = 0;
-
-    while (fgets(line, sizeof(line), f)) {
-        line_num++;
-
-        /* Strip trailing newline */
-        char *nl = strchr(line, '\n');
-        if (nl) *nl = '\0';
-
-        char *p = trim(line);
-
-        /* Skip blank lines and comments */
-        if (p[0] == '\0' || p[0] == '#') continue;
-
-        /* Split on '=' */
-        char *eq = strchr(p, '=');
-        if (!eq) {
-            fprintf(stderr, "config: line %d: no '=' found, skipped\n",
-                    line_num);
-            continue;
-        }
-
-        *eq = '\0';
-        char *key = trim(p);
-        char *val = trim(eq + 1);
-
-        /* Dispatch on key */
-        if (strcmp(key, "font_path") == 0) {
-            strncpy(cfg->font_path, val, CFG_PATH_MAX - 1);
-
-        } else if (strcmp(key, "font_size") == 0) {
-            int v = atoi(val);
-            if (v >= 8 && v <= 72) cfg->font_size = v;
-
-        } else if (strcmp(key, "win_width") == 0) {
-            int v = atoi(val);
-            if (v >= 200) cfg->win_width = v;
-
-        } else if (strcmp(key, "win_height") == 0) {
-            int v = atoi(val);
-            if (v >= 100) cfg->win_height = v;
-
-        } else if (strcmp(key, "fg_color") == 0) {
-            int r, g, b;
-            if (sscanf(val, "%d,%d,%d", &r, &g, &b) == 3) {
-                cfg->fg_r = (uint8_t)r;
-                cfg->fg_g = (uint8_t)g;
-                cfg->fg_b = (uint8_t)b;
-            }
-
-        } else if (strcmp(key, "bg_color") == 0) {
-            int r, g, b;
-            if (sscanf(val, "%d,%d,%d", &r, &g, &b) == 3) {
-                cfg->bg_r = (uint8_t)r;
-                cfg->bg_g = (uint8_t)g;
-                cfg->bg_b = (uint8_t)b;
-            }
-
-        } else if (strcmp(key, "cursor_blink_ms") == 0) {
-            int v = atoi(val);
-            if (v >= 0) cfg->cursor_blink_ms = v;
-
-        } else if (strcmp(key, "shell") == 0) {
-            strncpy(cfg->shell, val, CFG_PATH_MAX - 1);
-
-        } else if (strcmp(key, "scrollback") == 0) {
-            int v = atoi(val);
-            if (v >= 100 && v <= 50000)
-                cfg->scrollback_lines = v;
-
-        } else if (strcmp(key, "tab_width") == 0) {
-            int v = atoi(val);
-            if (v >= 60 && v <= 400) cfg->tab_width = v;
-
-        } else if (strcmp(key, "tab_bar_height") == 0) {
-            int v = atoi(val);
-            if (v >= 16 && v <= 60) cfg->tab_bar_height = v;
-
-        } else {
-            /* Unknown key — silently ignore */
-        }
-    }
-
-    fclose(f);
-    printf("config: font=%s size=%d win=%dx%d\n",
-           cfg->font_path, cfg->font_size,
-           cfg->win_width, cfg->win_height);
+/* ── config_print ───────────────────────────────────────────── */
+void config_print(void) {
+    printf("=== cterm config ===\n");
+    printf("font_path    : %s\n", g_config.font_path);
+    printf("font_size    : %d\n", g_config.font_size);
+    printf("fg_color     : %d %d %d\n",
+           g_config.fg_r, g_config.fg_g, g_config.fg_b);
+    printf("bg_color     : %d %d %d\n",
+           g_config.bg_r, g_config.bg_g, g_config.bg_b);
+    printf("window       : %dx%d\n",
+           g_config.window_width, g_config.window_height);
+    printf("scrollback   : %d\n", g_config.scrollback_lines);
+    printf("fullscreen   : %d\n", g_config.start_fullscreen);
+    printf("====================\n");
 }
