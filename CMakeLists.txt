@@ -4,16 +4,19 @@ project(cterm C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# ── Platform detection ────────────────────────────────────────
+# ── Platform ─────────────────────────────────────────────────
 if(WIN32)
-    message(STATUS "cterm: building for Windows")
+    message(STATUS "Building for Windows")
     add_compile_definitions(CTERM_WINDOWS _WIN32_WINNT=0x0A00)
 else()
-    message(STATUS "cterm: building for Linux")
-    add_compile_definitions(CTERM_LINUX _GNU_SOURCE _DEFAULT_SOURCE)
+    message(STATUS "Building for Linux")
+    add_compile_definitions(
+        CTERM_LINUX
+        _GNU_SOURCE
+        _DEFAULT_SOURCE
+    )
 endif()
 
-# ── Include paths ─────────────────────────────────────────────
 include_directories(include)
 
 # ── SDL2 ──────────────────────────────────────────────────────
@@ -24,20 +27,20 @@ include_directories(${SDL2_INCLUDE_DIRS})
 find_package(Freetype REQUIRED)
 include_directories(${FREETYPE_INCLUDE_DIRS})
 
-# ── Source files ──────────────────────────────────────────────
+# ── Sources ───────────────────────────────────────────────────
 add_executable(cterm
     src/main.c       # Entry point, main loop, event handling
-    src/window.c     # SDL2 window + renderer
-    src/font.c       # FreeType glyph cache + rendering
-    src/pty.c        # PTY: fork, exec, read, write, resize
-    src/ansi.c       # ANSI/VT100 parser + terminal cell grid
+    src/window.c     # SDL2 window + renderer + fullscreen
+    src/font.c       # FreeType glyph cache + text rendering
+    src/pty.c        # PTY open, fork, read, write, resize
+    src/ansi.c       # ANSI/VT100 parser + terminal grid
     src/tabs.c       # Tab bar + TabManager
     src/pane.c       # Split pane binary tree
-    src/tools.c      # Built-in tool launcher
+    src/tools.c      # Built-in tool launcher overlay
     src/config.c     # Config file loader (Module 12)
 )
 
-# ── Link libraries ────────────────────────────────────────────
+# ── Link ──────────────────────────────────────────────────────
 if(WIN32)
     target_link_libraries(cterm
         ${SDL2_LIBRARIES}
@@ -61,8 +64,3 @@ target_compile_options(cterm PRIVATE
     -Wno-implicit-function-declaration
     -g
 )
-
-# ── Install target (optional) ─────────────────────────────────
-# Run: sudo cmake --install build
-install(TARGETS cterm DESTINATION /usr/local/bin)
-install(DIRECTORY assets/ DESTINATION /usr/local/share/cterm)
