@@ -1,0 +1,1226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cterm Documentation</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #21262d;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --accent3: #f78166;
+    --accent4: #d2a8ff;
+    --accent5: #ffa657;
+    --code-bg: #0d1117;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 15px;
+  }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0;
+    width: 260px; height: 100vh;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    z-index: 100;
+    padding: 0 0 40px;
+  }
+  .sidebar-logo {
+    padding: 24px 20px 20px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+  }
+  .sidebar-logo h1 {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: -0.5px;
+  }
+  .sidebar-logo p {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .sidebar nav a {
+    display: block;
+    padding: 7px 20px;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 13.5px;
+    transition: all 0.15s;
+    border-left: 3px solid transparent;
+  }
+  .sidebar nav a:hover,
+  .sidebar nav a.active {
+    color: var(--accent);
+    background: rgba(88,166,255,0.08);
+    border-left-color: var(--accent);
+  }
+  .sidebar nav .section-label {
+    padding: 16px 20px 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+  }
+  .version-badge {
+    display: inline-block;
+    background: rgba(63,185,80,0.15);
+    color: var(--accent2);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 12px;
+    margin-left: 6px;
+    font-weight: 600;
+  }
+
+  /* ── Main content ── */
+  .main {
+    margin-left: 260px;
+    max-width: 900px;
+    padding: 48px 60px;
+  }
+
+  /* ── Page sections ── */
+  .page {
+    min-height: 100vh;
+    padding-bottom: 80px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 60px;
+  }
+  .page:last-child { border-bottom: none; }
+
+  .page-header {
+    margin-bottom: 40px;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  .page-number {
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+  }
+  h2.page-title {
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.5px;
+    margin-bottom: 10px;
+  }
+  .page-subtitle {
+    color: var(--muted);
+    font-size: 16px;
+  }
+
+  /* ── Typography ── */
+  h3 {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 36px 0 14px;
+  }
+  h4 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--accent4);
+    margin: 24px 0 10px;
+  }
+  p { margin-bottom: 16px; color: #c9d1d9; }
+
+  /* ── Code ── */
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    overflow-x: auto;
+    margin: 20px 0;
+    font-size: 13.5px;
+    line-height: 1.6;
+  }
+  code {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 13px;
+  }
+  p code, li code {
+    background: var(--surface2);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--accent3);
+    font-size: 13px;
+  }
+  .kw  { color: #ff7b72; }
+  .str { color: #a5d6ff; }
+  .cmt { color: #8b949e; font-style: italic; }
+  .fn  { color: #d2a8ff; }
+  .num { color: #79c0ff; }
+  .typ { color: #ffa657; }
+
+  /* ── Tables ── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 20px 0;
+    font-size: 14px;
+  }
+  th {
+    background: var(--surface2);
+    padding: 10px 14px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 2px solid var(--border);
+  }
+  td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    color: #c9d1d9;
+  }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  td:first-child code { color: var(--accent); }
+
+  /* ── Cards ── */
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+    margin: 24px 0;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    transition: border-color 0.2s;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card-icon {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+    margin-bottom: 12px;
+  }
+  .card h4 { margin: 0 0 6px; color: var(--text); font-size: 15px; }
+  .card p { font-size: 13px; color: var(--muted); margin: 0; }
+
+  /* ── Callouts ── */
+  .callout {
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 20px 0;
+    font-size: 14px;
+    border-left: 4px solid;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .callout-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+  .callout-content { flex: 1; }
+  .callout-content p { margin: 0; }
+  .callout.info {
+    background: rgba(88,166,255,0.08);
+    border-color: var(--accent);
+  }
+  .callout.tip {
+    background: rgba(63,185,80,0.08);
+    border-color: var(--accent2);
+  }
+  .callout.warn {
+    background: rgba(255,166,87,0.08);
+    border-color: var(--accent5);
+  }
+
+  /* ── Architecture diagram ── */
+  .arch-diagram {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    margin: 20px 0;
+    font-family: monospace;
+    font-size: 13px;
+    line-height: 1.8;
+    color: #8b949e;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .arch-diagram .box { color: var(--accent); }
+  .arch-diagram .arrow { color: var(--accent5); }
+  .arch-diagram .label { color: var(--accent2); }
+
+  /* ── Shortcut key ── */
+  kbd {
+    display: inline-block;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-bottom: 3px solid var(--border);
+    border-radius: 5px;
+    padding: 2px 8px;
+    font-family: monospace;
+    font-size: 12px;
+    color: var(--text);
+    margin: 0 2px;
+  }
+
+  /* ── Module timeline ── */
+  .timeline {
+    position: relative;
+    padding-left: 28px;
+    margin: 24px 0;
+  }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 7px; top: 8px; bottom: 8px;
+    width: 2px;
+    background: var(--border);
+  }
+  .timeline-item {
+    position: relative;
+    margin-bottom: 20px;
+    padding: 14px 18px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .timeline-item::before {
+    content: '';
+    position: absolute;
+    left: -21px; top: 18px;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--bg);
+  }
+  .timeline-item h4 { margin: 0 0 4px; color: var(--accent); }
+  .timeline-item p { margin: 0; font-size: 13px; color: var(--muted); }
+
+  /* ── File tree ── */
+  .file-tree {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    font-family: monospace;
+    font-size: 13px;
+    line-height: 1.9;
+    margin: 20px 0;
+  }
+  .file-tree .dir { color: var(--accent); font-weight: 600; }
+  .file-tree .file { color: #c9d1d9; }
+  .file-tree .comment { color: var(--muted); }
+  .file-tree .indent { color: var(--border); }
+
+  /* ── Hero section ── */
+  .hero {
+    background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 40px;
+    margin-bottom: 40px;
+    text-align: center;
+  }
+  .hero h1 {
+    font-size: 48px;
+    font-weight: 800;
+    background: linear-gradient(135deg, #58a6ff, #3fb950);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 12px;
+    letter-spacing: -1px;
+  }
+  .hero p {
+    font-size: 18px;
+    color: var(--muted);
+    max-width: 500px;
+    margin: 0 auto 24px;
+  }
+  .hero-badges {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .badge {
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid;
+  }
+  .badge-blue  { background: rgba(88,166,255,0.1);  color: var(--accent);  border-color: rgba(88,166,255,0.3); }
+  .badge-green { background: rgba(63,185,80,0.1);   color: var(--accent2); border-color: rgba(63,185,80,0.3);  }
+  .badge-orange{ background: rgba(255,166,87,0.1);  color: var(--accent5); border-color: rgba(255,166,87,0.3); }
+  .badge-purple{ background: rgba(210,168,255,0.1); color: var(--accent4); border-color: rgba(210,168,255,0.3);}
+
+  /* ── Steps ── */
+  .steps { counter-reset: step; margin: 24px 0; }
+  .step {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 20px;
+    align-items: flex-start;
+  }
+  .step-num {
+    counter-increment: step;
+    flex-shrink: 0;
+    width: 32px; height: 32px;
+    background: var(--accent);
+    color: #000;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700;
+    font-size: 14px;
+  }
+  .step-num::before { content: counter(step); }
+  .step-body h4 { margin: 4px 0 8px; }
+  .step-body p { margin: 0; font-size: 14px; }
+
+  /* ── Scrollbar ── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  @media(max-width: 768px) {
+    .sidebar { display: none; }
+    .main { margin-left: 0; padding: 24px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Sidebar ── -->
+<aside class="sidebar">
+  <div class="sidebar-logo">
+    <h1>cterm <span class="version-badge">v1.0</span></h1>
+    <p>GPU-accelerated terminal emulator</p>
+  </div>
+  <nav>
+    <div class="section-label">Getting Started</div>
+    <a href="#intro" class="active">Introduction</a>
+    <a href="#install">Installation</a>
+    <a href="#quickstart">Quick Start</a>
+
+    <div class="section-label">User Guide</div>
+    <a href="#interface">Interface</a>
+    <a href="#shortcuts">Keyboard Shortcuts</a>
+    <a href="#tools">Tool Launcher</a>
+    <a href="#config">Configuration</a>
+
+    <div class="section-label">Developer Guide</div>
+    <a href="#architecture">Architecture</a>
+    <a href="#modules">Modules</a>
+    <a href="#contributing">Contributing</a>
+  </nav>
+</aside>
+
+<!-- ── Main ── -->
+<main class="main">
+
+<!-- ════════════════════════════════════════════════
+     PAGE 1 — INTRODUCTION
+     ════════════════════════════════════════════════ -->
+<section class="page" id="intro">
+  <div class="hero">
+    <h1>cterm</h1>
+    <p>A fast, modern, GPU-accelerated terminal emulator written entirely in C</p>
+    <div class="hero-badges">
+      <span class="badge badge-blue">SDL2 GPU Rendering</span>
+      <span class="badge badge-green">Real PTY Shell</span>
+      <span class="badge badge-orange">Split Panes</span>
+      <span class="badge badge-purple">Built-in Tools</span>
+    </div>
+  </div>
+
+  <div class="page-header">
+    <div class="page-number">Page 01 — Introduction</div>
+    <h2 class="page-title">What is cterm?</h2>
+    <p class="page-subtitle">A complete terminal emulator built from scratch in C, without GTK or Qt</p>
+  </div>
+
+  <p>cterm is a production-quality terminal emulator written from scratch in C99. Unlike most terminal emulators that rely on GTK or Qt for their GUI, cterm uses SDL2 directly — giving it GPU-accelerated rendering, minimal dependencies, and portability across Linux and Windows.</p>
+
+  <p>Every component was built by hand: the PTY process management, the ANSI/VT100 escape sequence parser, the FreeType glyph cache, the split-pane tree, the tab system, and the built-in tool launcher. This makes cterm both a working terminal and a learning resource for systems programming in C.</p>
+
+  <h3>Why cterm?</h3>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon" style="background:rgba(88,166,255,0.15)">⚡</div>
+      <h4>GPU Accelerated</h4>
+      <p>All text rendering uses FreeType glyph textures drawn by the SDL2 GPU renderer. Dirty-cell optimization skips unchanged cells.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background:rgba(63,185,80,0.15)">🔧</div>
+      <h4>Zero Framework</h4>
+      <p>No GTK, no Qt, no Electron. Just SDL2 + FreeType + POSIX. Minimal dependencies, maximum portability.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background:rgba(255,166,87,0.15)">🗂️</div>
+      <h4>Tabs &amp; Panes</h4>
+      <p>Multiple independent shell sessions in tabs. Horizontal and vertical split panes — each with its own PTY.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon" style="background:rgba(210,168,255,0.15)">🚀</div>
+      <h4>Tool Launcher</h4>
+      <p>Press Ctrl+P to open a searchable launcher for 60+ tools. Auto-detects what is installed on your system.</p>
+    </div>
+  </div>
+
+  <h3>Comparison</h3>
+  <table>
+    <thead>
+      <tr><th>Feature</th><th>cterm</th><th>GNOME Terminal</th><th>Terminator</th><th>Alacritty</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Language</td><td>C</td><td>C / Python</td><td>Python</td><td>Rust</td></tr>
+      <tr><td>GUI Framework</td><td>SDL2 (none)</td><td>GTK4</td><td>GTK3</td><td>winit</td></tr>
+      <tr><td>GPU rendering</td><td>✓</td><td>✓</td><td>✗</td><td>✓</td></tr>
+      <tr><td>Split panes</td><td>✓</td><td>✗</td><td>✓</td><td>✗</td></tr>
+      <tr><td>Built-in tool launcher</td><td>✓</td><td>✗</td><td>✗</td><td>✗</td></tr>
+      <tr><td>Config file</td><td>✓</td><td>dconf</td><td>✓</td><td>✓</td></tr>
+      <tr><td>Windows support</td><td>✓ (ConPTY)</td><td>✗</td><td>✗</td><td>✓</td></tr>
+      <tr><td>Open source</td><td>✓ MIT</td><td>✓ GPL</td><td>✓ GPL</td><td>✓ Apache</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout info">
+    <span class="callout-icon">ℹ</span>
+    <div class="callout-content">
+      <p><strong>For developers:</strong> cterm's source code is thoroughly commented and structured as a learning resource. Each module teaches a fundamental systems programming concept — PTY, ANSI parsing, memory management, GPU rendering.</p>
+    </div>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════
+     PAGE 2 — INSTALLATION
+     ════════════════════════════════════════════════ -->
+<section class="page" id="install">
+  <div class="page-header">
+    <div class="page-number">Page 02 — Installation</div>
+    <h2 class="page-title">Installation</h2>
+    <p class="page-subtitle">Build cterm from source in under 5 minutes</p>
+  </div>
+
+  <h3>System Requirements</h3>
+  <table>
+    <thead><tr><th>Component</th><th>Minimum</th><th>Recommended</th></tr></thead>
+    <tbody>
+      <tr><td>OS</td><td>Linux (any), Windows 10 1809+</td><td>Ubuntu 22.04 LTS</td></tr>
+      <tr><td>CPU</td><td>Any x86-64</td><td>Modern multi-core</td></tr>
+      <tr><td>RAM</td><td>64 MB</td><td>256 MB</td></tr>
+      <tr><td>GPU</td><td>OpenGL 2.1 / DirectX 9</td><td>Any modern GPU</td></tr>
+      <tr><td>Compiler</td><td>GCC 7+ or Clang 6+</td><td>GCC 12+</td></tr>
+      <tr><td>CMake</td><td>3.16+</td><td>Latest</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Dependencies</h3>
+  <h4>Ubuntu / Debian</h4>
+  <pre><code>sudo apt update
+sudo apt install <span class="str">cmake libsdl2-dev libfreetype-dev libgl1-mesa-dev git</span></code></pre>
+
+  <h4>Fedora / RHEL</h4>
+  <pre><code>sudo dnf install <span class="str">cmake SDL2-devel freetype-devel mesa-libGL-devel git</span></code></pre>
+
+  <h4>Arch Linux</h4>
+  <pre><code>sudo pacman -S <span class="str">cmake sdl2 freetype2 git</span></code></pre>
+
+  <h3>Build from Source</h3>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body">
+        <h4>Clone the repository</h4>
+        <pre><code>git clone https://github.com/yourusername/cterm.git
+cd cterm</code></pre>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body">
+        <h4>Create build directory</h4>
+        <pre><code>mkdir build &amp;&amp; cd build</code></pre>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body">
+        <h4>Configure with CMake</h4>
+        <pre><code>cmake ..</code></pre>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body">
+        <h4>Compile</h4>
+        <pre><code>make -j$(nproc)</code></pre>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body">
+        <h4>Run</h4>
+        <pre><code>./cterm</code></pre>
+      </div>
+    </div>
+  </div>
+
+  <h3>Installing a Font (Recommended)</h3>
+  <p>cterm auto-detects monospace fonts. For the best experience install JetBrains Mono:</p>
+  <pre><code>sudo apt install fonts-jetbrains-mono</code></pre>
+
+  <div class="callout tip">
+    <span class="callout-icon">✓</span>
+    <div class="callout-content">
+      <p>On first run, cterm creates <code>~/.config/cterm/cterm.conf</code> with your current settings as defaults. Edit this file to customize font, colors, and window size.</p>
+    </div>
+  </div>
+
+  <h3>Windows Build</h3>
+  <p>Windows requires MSYS2 with the MinGW64 toolchain:</p>
+  <pre><code><span class="cmt"># In MSYS2 MinGW64 terminal</span>
+pacman -S mingw-w64-x86_64-SDL2 mingw-w64-x86_64-freetype mingw-w64-x86_64-cmake
+
+mkdir build-windows &amp;&amp; cd build-windows
+cmake .. -G <span class="str">"MinGW Makefiles"</span>
+mingw32-make
+./cterm.exe</code></pre>
+</section>
+
+
+<!-- ════════════════════════════════════════════════
+     PAGE 3 — QUICK START
+     ════════════════════════════════════════════════ -->
+<section class="page" id="quickstart">
+  <div class="page-header">
+    <div class="page-number">Page 03 — Quick Start</div>
+    <h2 class="page-title">Quick Start</h2>
+    <p class="page-subtitle">Be productive in cterm within 2 minutes</p>
+  </div>
+
+  <h3>First Launch</h3>
+  <p>When cterm opens you will see a tab bar at the top and a bash shell prompt. Everything works exactly like any Linux terminal — type commands, press Enter, use Tab completion, Ctrl+C to interrupt.</p>
+
+  <div class="callout info">
+    <span class="callout-icon">ℹ</span>
+    <div class="callout-content">
+      <p>cterm runs a real bash process connected via PTY. All shell features work: aliases, environment variables, history, job control, shell scripts.</p>
+    </div>
+  </div>
+
+  <h3>Essential shortcuts to learn first</h3>
+  <table>
+    <thead><tr><th>Action</th><th>Shortcut</th></tr></thead>
+    <tbody>
+      <tr><td>Open new tab</td><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td></tr>
+      <tr><td>Close tab</td><td><kbd>Ctrl</kbd>+<kbd>W</kbd></td></tr>
+      <tr><td>Next tab</td><td><kbd>Ctrl</kbd>+<kbd>Tab</kbd></td></tr>
+      <tr><td>Split pane left/right</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>→</kbd></td></tr>
+      <tr><td>Split pane top/bottom</td><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>↓</kbd></td></tr>
+      <tr><td>Open tool launcher</td><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td></tr>
+      <tr><td>Toggle fullscreen</td><td><kbd>F11</kbd></td></tr>
+      <tr><td>Scroll history up</td><td>Mouse wheel up</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Try these workflows</h3>
+
+  <h4>Workflow 1 — Split terminal for coding</h4>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body"><h4>Open cterm</h4><p>You start with one bash shell</p></div>
+    </div>
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body">
+        <h4>Split horizontally</h4>
+        <p>Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>→</kbd> — now you have two panes side by side</p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body">
+        <h4>Open vim in left pane</h4>
+        <p>Click the left pane, type <code>vim myfile.c</code></p>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body">
+        <h4>Compile in right pane</h4>
+        <p>Click the right pane, type <code>make</code> — edit and compile simultaneously</p>
+      </div>
+    </div>
+  </div>
+
+  <h4>Workflow 2 — System monitoring</h4>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body"><h4>Press Ctrl+P</h4><p>The tool launcher opens</p></div>
+    </div>
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body"><h4>Type "btop"</h4><p>The list filters to btop</p></div>
+    </div>
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body"><h4>Press Enter</h4><p>btop opens in a new tab automatically</p></div>
+    </div>
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body"><h4>Switch between tabs</h4><p>Press <kbd>Ctrl</kbd>+<kbd>Tab</kbd> to go back to your shell</p></div>
+    </div>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════
+     PAGE 4 — INTERFACE
+     ════════════════════════════════════════════════ -->
+<section class="page" id="interface">
+  <div class="page-header">
+    <div class="page-number">Page 04 — User Guide</div>
+    <h2 class="page-title">Interface Overview</h2>
+    <p class="page-subtitle">Understanding every element of the cterm window</p>
+  </div>
+
+  <h3>Window Layout</h3>
+  <div class="arch-diagram"><span class="box">┌──────────────────────────────────────────────────────────────┐
+│  bash [1]  │  htop [2]  │  vim [3]  │  +            ×  □  ─  │  ← Tab bar (30px)
+├────────────────────────────┬─────────────────────────────────┤
+│                            │                                 │
+│   Left pane                │   Right pane                    │
+│   (focused — blue border)  │                                 │
+│                            │                                 │
+│   asad@machine:~$ _        │   $ vim main.c                  │
+│                            │                                 │
+│                            │                                 │
+│                            │                                 │
+├────────────────────────────┴─────────────────────────────────┤  ← Divider (4px)
+└──────────────────────────────────────────────────────────────┘</span></div>
+
+  <h3>Tab Bar</h3>
+  <p>The tab bar runs across the top of the window. Each tab represents one workspace containing one or more panes.</p>
+  <table>
+    <thead><tr><th>Element</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>Tab label</td><td>Shows "bash [N]" or the tool name if a tool was launched</td></tr>
+      <tr><td>Active tab</td><td>Lighter background with blue top accent line</td></tr>
+      <tr><td>Close button (x)</td><td>Click to close that tab. Last tab cannot be closed.</td></tr>
+      <tr><td>+ button</td><td>Click to open a new bash tab. Same as Ctrl+T.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Split Panes</h3>
+  <p>Each tab can be split into multiple panes arranged as a binary tree. Every pane has its own independent bash process — they do not share state.</p>
+  <table>
+    <thead><tr><th>Concept</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td>Focused pane</td><td>Blue border. Keyboard input goes here.</td></tr>
+      <tr><td>Divider</td><td>4px bar between panes. Visual separator only in v1.0.</td></tr>
+      <tr><td>Auto-resize</td><td>When you resize the window, all panes resize proportionally.</td></tr>
+      <tr><td>Background panes</td><td>Keep running — their output is parsed even when not focused.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Scrollback</h3>
+  <p>cterm keeps 5000 lines of history per pane. When you scroll up, a blue line appears at the top indicating you are in history mode. The cursor disappears. Any keypress returns you to live view.</p>
+
+  <table>
+    <thead><tr><th>Action</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td>Mouse wheel up</td><td>Scroll 3 lines into history</td></tr>
+      <tr><td>Mouse wheel down</td><td>Scroll 3 lines toward live view</td></tr>
+      <tr><td>Page Up</td><td>Jump half a screen up</td></tr>
+      <tr><td>Page Down</td><td>Jump half a screen down</td></tr>
+      <tr><td>Any keypress</td><td>Snap back to live view immediately</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout tip">
+    <span class="callout-icon">✓</span>
+    <div class="callout-content">
+      <p>The scroll position indicator on the right edge of the terminal shows where you are in history as a proportional bar.</p>
+    </div>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════
+     PAGE 5 — KEYBOARD SHORTCUTS
+     ════════════════════════════════════════════════ -->
+<section class="page" id="shortcuts">
+  <div class="page-header">
+    <div class="page-number">Page 05 — User Guide</div>
+    <h2 class="page-title">Keyboard Shortcuts</h2>
+    <p class="page-subtitle">Complete reference for all cterm key bindings</p>
+  </div>
+
+  <h3>Tab Management</h3>
+  <table>
+    <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>Open new tab</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>W</kbd></td><td>Close current tab</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Tab</kbd></td><td>Switch to next tab (wraps)</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Tab</kbd></td><td>Switch to previous tab (wraps)</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>1</kbd> … <kbd>9</kbd></td><td>Jump directly to tab 1–9</td></tr>
+      <tr><td>Click tab label</td><td>Switch to that tab</td></tr>
+      <tr><td>Click <strong>×</strong> on tab</td><td>Close that tab</td></tr>
+      <tr><td>Click <strong>+</strong></td><td>Open new tab</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Pane Management</h3>
+  <table>
+    <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>→</kbd></td><td>Split focused pane horizontally (left / right)</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>↓</kbd></td><td>Split focused pane vertically (top / bottom)</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd></td><td>Cycle focus to next pane</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></td><td>Close focused pane</td></tr>
+      <tr><td>Click inside a pane</td><td>Focus that pane</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Window</h3>
+  <table>
+    <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>F11</kbd></td><td>Toggle fullscreen</td></tr>
+      <tr><td><kbd>Alt</kbd>+<kbd>Enter</kbd></td><td>Toggle fullscreen (alternative)</td></tr>
+      <tr><td>Drag window edge</td><td>Resize — all panes adapt automatically</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Tool Launcher</h3>
+  <table>
+    <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td><td>Open tool launcher overlay</td></tr>
+      <tr><td>Type characters</td><td>Filter tool list in real-time</td></tr>
+      <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>Move selection up/down</td></tr>
+      <tr><td><kbd>Page Up</kbd> / <kbd>Page Down</kbd></td><td>Scroll list by one full page</td></tr>
+      <tr><td><kbd>Home</kbd> / <kbd>End</kbd></td><td>Jump to first / last result</td></tr>
+      <tr><td><kbd>Enter</kbd></td><td>Launch selected tool in new tab</td></tr>
+      <tr><td><kbd>Escape</kbd></td><td>Close launcher without launching</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Scrollback</h3>
+  <table>
+    <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td>Mouse wheel up</td><td>Scroll 3 lines into history</td></tr>
+      <tr><td>Mouse wheel down</td><td>Scroll 3 lines toward live</td></tr>
+      <tr><td><kbd>Page Up</kbd></td><td>Scroll up half a screen</td></tr>
+      <tr><td><kbd>Page Down</kbd></td><td>Scroll down half a screen</td></tr>
+      <tr><td>Any key</td><td>Snap back to live view</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Shell Control (standard)</h3>
+  <table>
+    <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>C</kbd></td><td>Interrupt running process (SIGINT)</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>D</kbd></td><td>Send EOF / exit shell</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>Suspend process (SIGTSTP)</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>L</kbd></td><td>Clear screen</td></tr>
+      <tr><td><kbd>↑</kbd> / <kbd>↓</kbd></td><td>Command history (readline)</td></tr>
+      <tr><td><kbd>Tab</kbd></td><td>Auto-complete (readline)</td></tr>
+    </tbody>
+  </table>
+</section>
+
+
+<!-- ════════════════════════════════════════════════
+     PAGE 6 — TOOL LAUNCHER
+     ════════════════════════════════════════════════ -->
+<section class="page" id="tools">
+  <div class="page-header">
+    <div class="page-number">Page 06 — User Guide</div>
+    <h2 class="page-title">Tool Launcher</h2>
+    <p class="page-subtitle">Built-in launcher for 60+ development and security tools</p>
+  </div>
+
+  <p>Press <kbd>Ctrl</kbd>+<kbd>P</kbd> to open the tool launcher. It searches all installed tools on your system and lets you launch any of them in a new tab with a single keypress.</p>
+
+  <div class="arch-diagram"><span class="box">┌─────────────────────────────────────────────────┐
+│  > btop                               [cursor]  │  ← Search bar
+├─────────────────────────────────────────────────┤
+│   1  btop      System monitor (CPU RAM...)      │  ← Selected row (highlighted)
+│   2  bpytop    Python resource monitor          │
+│   3  glances   Cross-platform monitor           │
+│─────────────────────────────────────────────────│
+│  Enter=launch  Esc=close  ↑↓=select  8/34 tools│  ← Footer
+└─────────────────────────────────────────────────┘  ← Scroll bar →</span></div>
+
+  <h3>How auto-detection works</h3>
+  <p>cterm searches every directory in your <code>$PATH</code> environment variable for each registered tool. Only tools that are actually installed and executable appear in the list. When you install a new tool and restart cterm, it appears automatically.</p>
+
+  <h3>Available tool categories</h3>
+  <table>
+    <thead><tr><th>Category</th><th>Tools</th></tr></thead>
+    <tbody>
+      <tr><td>System monitors</td><td>btop, htop, top, iotop, iftop, nethogs, glances, bpytop</td></tr>
+      <tr><td>Text editors</td><td>vim, nvim, nano, micro, emacs, helix</td></tr>
+      <tr><td>Network</td><td>nmap, netstat, ss, curl, wget, dig, traceroute, mtr, tcpdump</td></tr>
+      <tr><td>Security</td><td>reaver, aircrack-ng, john, hashcat, sqlmap, metasploit, hydra, nikto</td></tr>
+      <tr><td>File managers</td><td>ranger, mc, ncdu, nnn, lf</td></tr>
+      <tr><td>Development</td><td>python3, node, lua, ruby, gdb, make, cmake, cargo, go</td></tr>
+      <tr><td>Git tools</td><td>lazygit, tig, gitui</td></tr>
+      <tr><td>Databases</td><td>mysql, psql, sqlite3, redis-cli</td></tr>
+      <tr><td>Shells</td><td>bash, zsh, fish</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout tip">
+    <span class="callout-icon">✓</span>
+    <div class="callout-content">
+      <p><strong>Adding custom tools:</strong> Open <code>src/tools.c</code> and add a <code>smart_register()</code> call in <code>tools_init()</code>. Rebuild cterm. Your tool appears automatically if it is installed.</p>
+    </div>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════
+     PAGE 7 — CONFIGURATION
+     ════════════════════════════════════════════════ -->
+<section class="page" id="config">
+  <div class="page-header">
+    <div class="page-number">Page 07 — User Guide</div>
+    <h2 class="page-title">Configuration</h2>
+    <p class="page-subtitle">Customize cterm via ~/.config/cterm/cterm.conf</p>
+  </div>
+
+  <p>On first launch, cterm creates a default configuration file at <code>~/.config/cterm/cterm.conf</code>. Edit this file with any text editor and restart cterm to apply changes.</p>
+
+  <h3>Full configuration reference</h3>
+  <pre><code><span class="cmt"># cterm configuration file
+# ~/.config/cterm/cterm.conf
+# Lines starting with # are comments. Restart cterm after editing.</span>
+
+<span class="cmt"># ── Font ────────────────────────────────────────────────────</span>
+<span class="cmt"># Full path to a monospace .ttf font file.
+# cterm auto-detects fonts if this is commented out.</span>
+<span class="cmt"># font_path = /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf</span>
+<span class="typ">font_size</span>  = <span class="num">16</span>
+
+<span class="cmt"># ── Colors (R G B values, each 0-255) ───────────────────────</span>
+<span class="typ">fg_color</span>     = <span class="num">200 200 200</span>   <span class="cmt"># default text color</span>
+<span class="typ">bg_color</span>     = <span class="num">18 18 18</span>      <span class="cmt"># background color</span>
+<span class="typ">cursor_color</span> = <span class="num">220 220 220</span>   <span class="cmt"># cursor block color</span>
+
+<span class="cmt"># ── Window ──────────────────────────────────────────────────</span>
+<span class="typ">window_width</span>   = <span class="num">900</span>
+<span class="typ">window_height</span>  = <span class="num">560</span>
+<span class="cmt"># start_fullscreen = 0</span>
+
+<span class="cmt"># ── Terminal ────────────────────────────────────────────────</span>
+<span class="cmt"># Number of lines kept in scrollback history (100-50000)</span>
+<span class="typ">scrollback</span> = <span class="num">5000</span></code></pre>
+
+  <h3>Color themes</h3>
+  <h4>Solarized Dark</h4>
+  <pre><code>bg_color     = <span class="num">0 43 54</span>
+fg_color     = <span class="num">131 148 150</span>
+cursor_color = <span class="num">181 137 0</span></code></pre>
+
+  <h4>Nord</h4>
+  <pre><code>bg_color     = <span class="num">46 52 64</span>
+fg_color     = <span class="num">216 222 233</span>
+cursor_color = <span class="num">136 192 208</span></code></pre>
+
+  <h4>Dracula</h4>
+  <pre><code>bg_color     = <span class="num">40 42 54</span>
+fg_color     = <span class="num">248 248 242</span>
+cursor_color = <span class="num">80 250 123</span></code></pre>
+
+  <h4>Monokai</h4>
+  <pre><code>bg_color     = <span class="num">39 40 34</span>
+fg_color     = <span class="num">248 248 242</span>
+cursor_color = <span class="num">249 38 114</span></code></pre>
+
+  <h4>Gruvbox Dark</h4>
+  <pre><code>bg_color     = <span class="num">40 40 40</span>
+fg_color     = <span class="num">235 219 178</span>
+cursor_color = <span class="num">250 189 47</span></code></pre>
+
+  <div class="callout warn">
+    <span class="callout-icon">⚠</span>
+    <div class="callout-content">
+      <p>cterm must be restarted after editing the config file. There is no hot-reload in v1.0.</p>
+    </div>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════
+     PAGE 8 — ARCHITECTURE
+     ════════════════════════════════════════════════ -->
+<section class="page" id="architecture">
+  <div class="page-header">
+    <div class="page-number">Page 08 — Developer Guide</div>
+    <h2 class="page-title">Architecture</h2>
+    <p class="page-subtitle">How cterm works internally</p>
+  </div>
+
+  <h3>High-level data flow</h3>
+  <div class="arch-diagram"><span class="box">SDL2 Window
+     │
+     ├── SDL_PollEvent() ──────────────────────────────────────────────────┐
+     │       │                                                             │
+     │   keyboard / mouse                                              tab bar
+     │       │                                                             │
+     │   pty_write() ──► bash process (per pane)                   tabs_handle_click()
+     │                       │
+     │                   bash output
+     │                       │
+     │               pty_read() [non-blocking]
+     │                       │
+     │               terminal_process()   ◄── ANSI/VT100 parser
+     │                       │
+     │               cell grid update (dirty=1)
+     │
+     └── Render loop (60fps cap)
+             │
+         pane_layout()     ← compute pixel rects from pane tree
+             │
+         render_pane_tree()
+             │
+             ├── for each leaf pane:
+             │       for each cell where dirty==1:
+             │           SDL_RenderFillRect()   ← background
+             │           font_draw_char()       ← glyph
+             │           cell.dirty = 0
+             │
+         pane_draw_dividers()
+             │
+         tools_launcher_draw()  [if open]
+             │
+         SDL_RenderPresent()   ← flip to screen</span></div>
+
+  <h3>Project file structure</h3>
+  <div class="file-tree"><span class="dir">cterm/</span>
+<span class="indent">├── </span><span class="dir">src/</span>
+<span class="indent">│   ├── </span><span class="file">main.c</span>       <span class="comment">  — main loop, events, render orchestration</span>
+<span class="indent">│   ├── </span><span class="file">window.c</span>     <span class="comment">  — SDL2 window + renderer + fullscreen toggle</span>
+<span class="indent">│   ├── </span><span class="file">font.c</span>       <span class="comment">  — FreeType glyph cache + text rendering</span>
+<span class="indent">│   ├── </span><span class="file">pty.c</span>        <span class="comment">  — PTY: openpty, fork, exec, read, write, resize</span>
+<span class="indent">│   ├── </span><span class="file">ansi.c</span>       <span class="comment">  — ANSI/VT100 parser + terminal cell grid</span>
+<span class="indent">│   ├── </span><span class="file">tabs.c</span>       <span class="comment">  — tab bar rendering + TabManager</span>
+<span class="indent">│   ├── </span><span class="file">pane.c</span>       <span class="comment">  — split pane binary tree</span>
+<span class="indent">│   ├── </span><span class="file">tools.c</span>      <span class="comment">  — tool launcher overlay + auto-detection</span>
+<span class="indent">│   └── </span><span class="file">config.c</span>     <span class="comment">  — config file parser</span>
+<span class="indent">├── </span><span class="dir">include/</span>
+<span class="indent">│   ├── </span><span class="file">window.h  font.h  pty.h  ansi.h</span>
+<span class="indent">│   ├── </span><span class="file">tabs.h  pane.h  tools.h  config.h  platform.h</span>
+<span class="indent">├── </span><span class="dir">assets/</span>
+<span class="indent">│   └── </span><span class="file">font.ttf</span>     <span class="comment">  — fallback monospace font</span>
+<span class="indent">└── </span><span class="file">CMakeLists.txt</span></div>
+
+  <h3>Key data structures</h3>
+  <h4>Cell — one character position</h4>
+  <pre><code><span class="kw">typedef struct</span> {
+    <span class="kw">char</span>  ch;      <span class="cmt">/* printable character            */</span>
+    Color fg;      <span class="cmt">/* foreground RGB color           */</span>
+    Color bg;      <span class="cmt">/* background RGB color           */</span>
+    <span class="kw">int</span>   bold;    <span class="cmt">/* bold flag                      */</span>
+    <span class="kw">int</span>   dirty;   <span class="cmt">/* 1 = changed, needs redraw      */</span>
+} Cell;</code></pre>
+
+  <h4>Pane — split pane tree node</h4>
+  <pre><code><span class="kw">typedef struct</span> Pane {
+    PaneType       type;      <span class="cmt">/* LEAF, SPLIT_H, SPLIT_V        */</span>
+    Terminal      *term;      <span class="cmt">/* cell grid (leaf only)         */</span>
+    PTY            pty;       <span class="cmt">/* shell process (leaf only)     */</span>
+    <span class="kw">struct</span> Pane   *first;     <span class="cmt">/* left/top child (split only)   */</span>
+    <span class="kw">struct</span> Pane   *second;    <span class="cmt">/* right/bottom child            */</span>
+    <span class="kw">float</span>          ratio;     <span class="cmt">/* 0.5 = equal split             */</span>
+    SDL_Rect       rect;      <span class="cmt">/* pixel bounds (from layout)    */</span>
+    <span class="kw">int</span>            focused;   <span class="cmt">/* 1 = receives keyboard input   */</span>
+} Pane;</code></pre>
+</section>
+
+
+<!-- ════════════════════════════════════════════════
+     PAGE 9 — MODULES
+     ════════════════════════════════════════════════ -->
+<section class="page" id="modules">
+  <div class="page-header">
+    <div class="page-number">Page 09 — Developer Guide</div>
+    <h2 class="page-title">Module Reference</h2>
+    <p class="page-subtitle">Detailed description of every source file</p>
+  </div>
+
+  <div class="timeline">
+    <div class="timeline-item">
+      <h4>main.c — Entry point &amp; main loop</h4>
+      <p>Initializes all modules in order. Runs the main loop: poll SDL events → read PTY → compute pane layout → render. Implements the 60fps frame cap using SDL_GetTicks and SDL_Delay. Handles all keyboard shortcuts and routes events to the correct subsystem.</p>
+    </div>
+    <div class="timeline-item">
+      <h4>window.c — SDL2 window management</h4>
+      <p>Creates the SDL2 window with SDL_WINDOW_RESIZABLE. Manages the GPU renderer (SDL_RENDERER_ACCELERATED + SDL_RENDERER_PRESENTVSYNC). Implements F11 fullscreen toggle using SDL_WINDOW_FULLSCREEN_DESKTOP. Sets minimum window size (400×200).</p>
+    </div>
+    <div class="timeline-item">
+      <h4>font.c — FreeType glyph cache</h4>
+      <p>Loads a .ttf font using FreeType. Pre-renders all 96 printable ASCII characters into SDL2 textures at startup. The glyph cache means each character is rasterized once and reused every frame. Implements font_draw_char() and font_draw_string() using SDL_SetTextureColorMod for colorization.</p>
+    </div>
+    <div class="timeline-item">
+      <h4>pty.c — Pseudo-terminal management</h4>
+      <p>Calls openpty() to get a PTY pair. Forks a child process and exec's bash with TERM=xterm-256color, COLUMNS, LINES set. Sets O_NONBLOCK on the master fd. Sends SIGWINCH via a background child after 80ms to force readline to re-query terminal size. pty_resize() calls TIOCSWINSZ.</p>
+    </div>
+    <div class="timeline-item">
+      <h4>ansi.c — ANSI/VT100 parser</h4>
+      <p>Implements a 4-state FSM (NORMAL, ESCAPE, CSI, OSC). Handles all standard cursor movement, erase, insert/delete, SGR colors (16-color and truecolor). OSC state silently consumes title-setting sequences. DCH and ICH implement Delete key and mid-line insert. clear_cell() resets bg+fg+bold for correct erase behavior.</p>
+    </div>
+    <div class="timeline-item">
+      <h4>tabs.c — Tab management</h4>
+      <p>TabManager owns an array of Tab structs. Each Tab owns a pane tree (root Pane pointer). tabs_draw_bar() renders the tab bar using SDL2 primitives and font_draw_string(). tabs_handle_click() handles mouse clicks in the tab bar zone. Tabs shift left on close to maintain compact array.</p>
+    </div>
+    <div class="timeline-item">
+      <h4>pane.c — Split pane tree</h4>
+      <p>Binary tree where leaf nodes hold Terminal+PTY and split nodes hold two children + a ratio. pane_layout() recursively computes pixel SDL_Rects. pane_split() creates a new split node replacing a leaf. pane_close_focused() collapses a split, giving space to the sibling. pane_read_all() reads PTY output for every leaf.</p>
+    </div>
+    <div class="timeline-item">
+      <h4>tools.c — Tool launcher</h4>
+      <p>ToolManager registers 60+ tools. smart_register() calls tool_is_installed() which searches $PATH — only installed tools appear. Launcher overlay draws with full scroll support: scroll_offset tracks visible window, ensure_visible() adjusts it after selection changes. tools_launch() opens a new tab and sends the command to bash.</p>
+    </div>
+    <div class="timeline-item">
+      <h4>config.c — Configuration file</h4>
+      <p>config_load() reads ~/.config/cterm/cterm.conf. Parser splits lines on '=', trims whitespace, matches known keys. Unknown keys silently ignored. config_save_default() creates the directory and file on first run. All modules read g_config (global Config struct) instead of hardcoded values.</p>
+    </div>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════
+     PAGE 10 — CONTRIBUTING & SECURITY
+     ════════════════════════════════════════════════ -->
+<section class="page" id="contributing">
+  <div class="page-header">
+    <div class="page-number">Page 10 — Developer Guide</div>
+    <h2 class="page-title">Contributing &amp; Security</h2>
+    <p class="page-subtitle">How to contribute, the security model, and the roadmap</p>
+  </div>
+
+  <h3>Contributing</h3>
+  <p>Contributions are welcome. cterm follows a simple process:</p>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body"><h4>Fork &amp; clone</h4><pre><code>git clone https://github.com/yourusername/cterm.git</code></pre></div>
+    </div>
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body"><h4>Create a feature branch</h4><pre><code>git checkout -b feature/unicode-support</code></pre></div>
+    </div>
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body"><h4>Build with warnings</h4><pre><code>cmake .. &amp;&amp; make   <span class="cmt"># must produce zero warnings</span></code></pre></div>
+    </div>
+    <div class="step">
+      <div class="step-num"></div>
+      <div class="step-body"><h4>Open a pull request</h4><p>Describe what you changed and why. Link any relevant issues.</p></div>
+    </div>
+  </div>
+
+  <h3>Roadmap — planned features</h3>
+  <table>
+    <thead><tr><th>Feature</th><th>Priority</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Full 256-color palette</td><td>High</td><td>SGR 38;5;n mapping to full palette</td></tr>
+      <tr><td>Unicode / UTF-8 rendering</td><td>High</td><td>Requires FreeType Unicode codepoint support</td></tr>
+      <tr><td>Mouse reporting</td><td>Medium</td><td>For vim mouse mode, tmux mouse</td></tr>
+      <tr><td>Alternate screen buffer</td><td>Medium</td><td>Full-screen apps like vim, less, man</td></tr>
+      <tr><td>Clipboard copy/paste</td><td>Medium</td><td>Ctrl+Shift+C/V or selection</td></tr>
+      <tr><td>Search in scrollback</td><td>Medium</td><td>Ctrl+Shift+F to find in history</td></tr>
+      <tr><td>Draggable pane dividers</td><td>Low</td><td>Resize panes by dragging the divider</td></tr>
+      <tr><td>Plugin API</td><td>Low</td><td>Lua or shared library plugins</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Security model</h3>
+  <p>cterm is designed to be safe by default:</p>
+  <table>
+    <thead><tr><th>Property</th><th>Detail</th></tr></thead>
+    <tbody>
+      <tr><td>No privilege escalation</td><td>Runs entirely as the current user. Never needs root.</td></tr>
+      <tr><td>No network access</td><td>cterm itself makes zero network connections.</td></tr>
+      <tr><td>OSC sanitization</td><td>All OSC/DCS sequences consumed silently, never executed.</td></tr>
+      <tr><td>Process isolation</td><td>Each tab/pane is an independent process group.</td></tr>
+      <tr><td>Memory safety</td><td>All malloc returns checked, bounds clamped before array access.</td></tr>
+      <tr><td>No execution of config</td><td>font_path is passed to FreeType only — it does not execute code.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Hardened release build</h3>
+  <p>For distribution, add these flags to CMakeLists.txt:</p>
+  <pre><code>target_compile_options(cterm PRIVATE
+    -O2
+    -D_FORTIFY_SOURCE=<span class="num">2</span>
+    -fstack-protector-strong
+    -Wformat -Wformat-security
+)
+target_link_options(cterm PRIVATE
+    -Wl,-z,relro -Wl,-z,now
+)</code></pre>
+
+  <h3>License</h3>
+  <p>cterm is released under the <strong>MIT License</strong>. You are free to use, modify, and distribute it in any project — personal, commercial, or open source — with attribution.</p>
+
+  <div class="callout tip">
+    <span class="callout-icon">★</span>
+    <div class="callout-content">
+      <p><strong>Built by Muhammed Asad</strong> — a systems programming learning project that became a production terminal emulator. ~2000 lines of C, 12 modules, built from scratch.</p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<script>
+// Highlight active sidebar link based on scroll position
+const sections = document.querySelectorAll('.page');
+const links = document.querySelectorAll('.sidebar nav a');
+const observer = new IntersectionObserver(entries => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      links.forEach(l => l.classList.remove('active'));
+      const id = entry.target.id;
+      const link = document.querySelector(`.sidebar nav a[href="#${id}"]`);
+      if (link) link.classList.add('active');
+    }
+  });
+}, { threshold: 0.3 });
+sections.forEach(s => observer.observe(s));
+</script>
+</body>
+</html>
