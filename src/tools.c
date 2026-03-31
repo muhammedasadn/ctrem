@@ -99,6 +99,9 @@ void tools_init(ToolManager *tm) {
     register_tool(tm, "wget", "Network file downloader", "wget", 1, "--help", NULL);
     register_tool(tm, "dig", "DNS lookup utility", "dig", 1, NULL);
     register_tool(tm, "mtr", "Network diagnostic tool", "mtr", 1, NULL);
+    register_tool(tm, "traceroute", "Trace network path", "traceroute", 1, NULL);
+    register_tool(tm, "http", "HTTPie command line client", "http", 1, "--help", NULL);
+    register_tool(tm, "ncat", "Netcat style network utility", "ncat", 1, "--help", NULL);
     register_tool(tm, "tcpdump", "Network packet analyzer", "tcpdump", 1, "--help", NULL);
 
     register_tool(tm, "reaver", "WPS brute force tool", "reaver", 1, "--help", NULL);
@@ -113,11 +116,17 @@ void tools_init(ToolManager *tm) {
     register_tool(tm, "mc", "Midnight Commander", "mc", 1, NULL);
     register_tool(tm, "ncdu", "Disk usage analyzer", "ncdu", 1, NULL);
     register_tool(tm, "nnn", "Fast file manager", "nnn", 1, NULL);
+    register_tool(tm, "lf", "Terminal file manager", "lf", 1, NULL);
 
     register_tool(tm, "python3", "Python 3 REPL", "python3", 1, NULL);
     register_tool(tm, "node", "Node.js REPL", "node", 1, NULL);
     register_tool(tm, "lua", "Lua interpreter", "lua", 1, NULL);
+    register_tool(tm, "ruby", "Ruby interpreter", "ruby", 1, NULL);
+    register_tool(tm, "go", "Go toolchain help", "go", 1, "help", NULL);
     register_tool(tm, "gdb", "GNU debugger", "gdb", 1, NULL);
+    register_tool(tm, "lldb", "LLVM debugger", "lldb", 1, NULL);
+    register_tool(tm, "make", "GNU Make help", "make", 1, "--help", NULL);
+    register_tool(tm, "cmake", "CMake help", "cmake", 1, "--help", NULL);
     register_tool(tm, "cargo", "Rust package manager", "cargo", 1, "--help", NULL);
     register_tool(tm, "lazygit", "Terminal Git UI", "lazygit", 1, NULL);
     register_tool(tm, "tig", "Text-mode Git browser", "tig", 1, NULL);
