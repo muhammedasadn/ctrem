@@ -18,3 +18,7 @@ AppDir/*
 Thumbs.db
 *.swp
 *.swo
+
+.agent_pid
+
+.agent_log.txt
