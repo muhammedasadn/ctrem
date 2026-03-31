@@ -1,23 +1,3 @@
-/*
- * tools.c — Built-in tool launcher implementation.
- *
- * Fix: launcher list now scrolls.
- *
- * Previously the list showed a fixed window of LAUNCHER_VISIBLE_ROWS
- * rows and had no scroll_offset — so tools below row 8 were
- * permanently hidden and unreachable.
- *
- * Now:
- *   scroll_offset tracks the first visible row in the filtered list.
- *   When the user presses Down and selected reaches the bottom of
- *   the visible window, scroll_offset advances to follow.
- *   When the user presses Up and selected goes above scroll_offset,
- *   scroll_offset retreats.
- *   PageUp/PageDown jump a full page at a time.
- *   A scroll indicator bar is drawn on the right edge of the list
- *   so the user can see where they are in a long list.
- */
-
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -35,598 +15,580 @@
 #include <string.h>
 #include <unistd.h>
 
-
-/* ── Internal: register_tool ────────────────────────────────── */
-
-static void register_tool(ToolManager *tm,
-                           const char *name,
-                           const char *desc,
-                           const char *command,
-                           int new_tab, ...) {
-    if (tm->count >= MAX_TOOLS) return;
-
-    ToolDef *t = &tm->tools[tm->count];
-    memset(t, 0, sizeof(ToolDef));
-
-    strncpy(t->name,    name,    sizeof(t->name)    - 1);
-    strncpy(t->desc,    desc,    sizeof(t->desc)    - 1);
-    strncpy(t->command, command, sizeof(t->command) - 1);
-    t->new_tab  = new_tab;
-    t->args[0]  = t->command;   /* argv[0] = program name */
-
-    va_list vargs;
-    va_start(vargs, new_tab);
-    int idx = 1;
-    while (idx < MAX_TOOL_ARGS - 1) {
-        char *arg = va_arg(vargs, char *);
-        if (!arg) break;
-        t->args[idx++] = arg;
-    }
-    va_end(vargs);
-    t->args[idx] = NULL;
-
-    tm->count++;
+static void set_color(SDL_Renderer *renderer, int r, int g, int b, int a) {
+    SDL_SetRenderDrawColor(renderer, r, g, b, a);
 }
 
+static int tool_installed(const char *cmd) {
+    if (cmd[0] == '/') {
+        return access(cmd, X_OK) == 0;
+    }
 
-/* ── tools_init ─────────────────────────────────────────────── */
+    const char *path_env = getenv("PATH");
+    if (!path_env) {
+        path_env = "/usr/bin:/bin:/usr/local/bin";
+    }
+
+    char path_copy[4096];
+    strncpy(path_copy, path_env, sizeof(path_copy) - 1);
+    path_copy[sizeof(path_copy) - 1] = '\0';
+
+    char *dir = strtok(path_copy, ":");
+    while (dir) {
+        char full[512];
+        snprintf(full, sizeof(full), "%s/%s", dir, cmd);
+        if (access(full, X_OK) == 0) {
+            return 1;
+        }
+        dir = strtok(NULL, ":");
+    }
+    return 0;
+}
+
+static void register_tool(ToolManager *tm, const char *name,
+                          const char *desc, const char *cmd,
+                          int new_tab, ...) {
+    if (tm->count >= MAX_TOOLS || !tool_installed(cmd)) {
+        return;
+    }
+
+    ToolDef *tool = &tm->tools[tm->count];
+    memset(tool, 0, sizeof(ToolDef));
+    strncpy(tool->name, name, sizeof(tool->name) - 1);
+    strncpy(tool->desc, desc, sizeof(tool->desc) - 1);
+    strncpy(tool->command, cmd, sizeof(tool->command) - 1);
+    tool->new_tab = new_tab;
+    tool->args[0] = tool->command;
+
+    va_list args;
+    va_start(args, new_tab);
+    int idx = 1;
+    while (idx < MAX_TOOL_ARGS - 1) {
+        char *arg = va_arg(args, char *);
+        if (!arg) {
+            break;
+        }
+        tool->args[idx++] = arg;
+    }
+    va_end(args);
+
+    tool->args[idx] = NULL;
+    tm->count++;
+}
 
 void tools_init(ToolManager *tm) {
     memset(tm, 0, sizeof(ToolManager));
 
-    /* System monitors */
-    register_tool(tm, "btop",
-        "Interactive system monitor (CPU RAM network disk)",
-        "btop", 1, NULL);
-    register_tool(tm, "htop",
-        "Interactive process viewer and manager",
-        "htop", 1, NULL);
-    register_tool(tm, "top",
-        "Classic Unix process monitor",
-        "top", 1, NULL);
-    register_tool(tm, "iotop",
-        "Monitor disk I/O by process (needs root)",
-        "iotop", 1, NULL);
-    register_tool(tm, "iftop",
-        "Monitor network bandwidth by connection",
-        "iftop", 1, NULL);
-    register_tool(tm, "nethogs",
-        "Show network usage per process",
-        "nethogs", 1, NULL);
+    register_tool(tm, "btop", "System monitor", "btop", 1, NULL);
+    register_tool(tm, "htop", "Interactive process viewer", "htop", 1, NULL);
+    register_tool(tm, "top", "Classic process monitor", "top", 1, NULL);
+    register_tool(tm, "iotop", "Disk I/O monitor", "iotop", 1, NULL);
+    register_tool(tm, "iftop", "Network bandwidth monitor", "iftop", 1, NULL);
+    register_tool(tm, "glances", "Cross-platform system monitor", "glances", 1, NULL);
 
-    /* Text editors */
-    register_tool(tm, "vim",
-        "Vi IMproved — powerful modal text editor",
-        "vim", 1, NULL);
-    register_tool(tm, "nano",
-        "Simple beginner-friendly terminal text editor",
-        "nano", 1, NULL);
-    register_tool(tm, "micro",
-        "Modern terminal text editor with mouse support",
-        "micro", 1, NULL);
-    register_tool(tm, "emacs",
-        "GNU Emacs text editor (terminal mode)",
-        "emacs", 1, "-nw", NULL);
+    register_tool(tm, "vim", "Vi IMproved text editor", "vim", 1, NULL);
+    register_tool(tm, "nvim", "Neovim text editor", "nvim", 1, NULL);
+    register_tool(tm, "nano", "Simple terminal editor", "nano", 1, NULL);
+    register_tool(tm, "micro", "Modern terminal editor", "micro", 1, NULL);
+    register_tool(tm, "emacs", "GNU Emacs in terminal mode", "emacs", 1, "-nw", NULL);
 
-    /* Network tools */
-    register_tool(tm, "nmap",
-        "Network exploration and port scanner",
-        "nmap", 1, "--help", NULL);
-    register_tool(tm, "netstat",
-        "Display network connections and routing",
-        "netstat", 1, "-tulpn", NULL);
-    register_tool(tm, "ss",
-        "Socket statistics — modern netstat replacement",
-        "ss", 1, "-tulpn", NULL);
-    register_tool(tm, "curl",
-        "Transfer data with URLs (HTTP FTP etc.)",
-        "curl", 1, "--help", NULL);
-    register_tool(tm, "wget",
-        "Non-interactive network file downloader",
-        "wget", 1, "--help", NULL);
-    register_tool(tm, "dig",
-        "DNS lookup utility",
-        "dig", 1, NULL);
-    register_tool(tm, "ping",
-        "Send ICMP echo requests to a host",
-        "ping", 1, "-c", "4", "8.8.8.8", NULL);
-    register_tool(tm, "traceroute",
-        "Trace network path to a host",
-        "traceroute", 1, NULL);
+    register_tool(tm, "nmap", "Network port scanner", "nmap", 1, "--help", NULL);
+    register_tool(tm, "netstat", "Network connections display", "netstat", 1, "-tulpn", NULL);
+    register_tool(tm, "ss", "Socket statistics", "ss", 1, "-tulpn", NULL);
+    register_tool(tm, "curl", "HTTP and FTP transfer tool", "curl", 1, "--help", NULL);
+    register_tool(tm, "wget", "Network file downloader", "wget", 1, "--help", NULL);
+    register_tool(tm, "dig", "DNS lookup utility", "dig", 1, NULL);
+    register_tool(tm, "mtr", "Network diagnostic tool", "mtr", 1, NULL);
+    register_tool(tm, "tcpdump", "Network packet analyzer", "tcpdump", 1, "--help", NULL);
 
-    /* Security tools */
-    register_tool(tm, "reaver",
-        "WPS brute force attack tool (needs root + monitor)",
-        "reaver", 1, "--help", NULL);
-    register_tool(tm, "aircrack-ng",
-        "WEP/WPA/WPA2 cracking suite",
-        "aircrack-ng", 1, "--help", NULL);
-    register_tool(tm, "john",
-        "John the Ripper password cracker",
-        "john", 1, "--help", NULL);
+    register_tool(tm, "reaver", "WPS brute force tool", "reaver", 1, "--help", NULL);
+    register_tool(tm, "aircrack-ng", "WPA and WEP cracking suite", "aircrack-ng", 1, "--help", NULL);
+    register_tool(tm, "john", "Password cracker", "john", 1, "--help", NULL);
+    register_tool(tm, "hashcat", "GPU password cracker", "hashcat", 1, "--help", NULL);
+    register_tool(tm, "sqlmap", "SQL injection scanner", "sqlmap", 1, "--help", NULL);
+    register_tool(tm, "hydra", "Login brute forcer", "hydra", 1, "--help", NULL);
+    register_tool(tm, "nikto", "Web server scanner", "nikto", 1, "--help", NULL);
 
-    /* File managers */
-    register_tool(tm, "ranger",
-        "Terminal file manager with vim keybindings",
-        "ranger", 1, NULL);
-    register_tool(tm, "mc",
-        "Midnight Commander dual-pane file manager",
-        "mc", 1, NULL);
-    register_tool(tm, "ncdu",
-        "NCurses disk usage — find large files fast",
-        "ncdu", 1, NULL);
+    register_tool(tm, "ranger", "Vim-style file manager", "ranger", 1, NULL);
+    register_tool(tm, "mc", "Midnight Commander", "mc", 1, NULL);
+    register_tool(tm, "ncdu", "Disk usage analyzer", "ncdu", 1, NULL);
+    register_tool(tm, "nnn", "Fast file manager", "nnn", 1, NULL);
 
-    /* Programming REPLs */
-    register_tool(tm, "python3",
-        "Python 3 interactive interpreter",
-        "python3", 1, NULL);
-    register_tool(tm, "node",
-        "Node.js JavaScript runtime REPL",
-        "node", 1, NULL);
-    register_tool(tm, "lua",
-        "Lua interactive interpreter",
-        "lua", 1, NULL);
-    register_tool(tm, "gdb",
-        "GNU Debugger for C/C++ programs",
-        "gdb", 1, NULL);
+    register_tool(tm, "python3", "Python 3 REPL", "python3", 1, NULL);
+    register_tool(tm, "node", "Node.js REPL", "node", 1, NULL);
+    register_tool(tm, "lua", "Lua interpreter", "lua", 1, NULL);
+    register_tool(tm, "gdb", "GNU debugger", "gdb", 1, NULL);
+    register_tool(tm, "cargo", "Rust package manager", "cargo", 1, "--help", NULL);
+    register_tool(tm, "lazygit", "Terminal Git UI", "lazygit", 1, NULL);
+    register_tool(tm, "tig", "Text-mode Git browser", "tig", 1, NULL);
+    register_tool(tm, "mysql", "MySQL client", "mysql", 1, "--help", NULL);
+    register_tool(tm, "psql", "PostgreSQL client", "psql", 1, "--help", NULL);
+    register_tool(tm, "sqlite3", "SQLite client", "sqlite3", 1, NULL);
 
-    /* Git */
-    register_tool(tm, "lazygit",
-        "Terminal UI for git",
-        "lazygit", 1, NULL);
-    register_tool(tm, "tig",
-        "Text-mode git repository browser",
-        "tig", 1, NULL);
-
-    /* Shells */
-    register_tool(tm, "bash",
-        "New bash shell session",
-        "/bin/bash", 1, NULL);
-    register_tool(tm, "zsh",
-        "Z shell with plugins support",
-        "zsh", 1, NULL);
-    register_tool(tm, "fish",
-        "Friendly interactive shell",
-        "fish", 1, NULL);
-
-    printf("ToolManager: %d tools registered.\n", tm->count);
+    register_tool(tm, "bash", "New Bash shell", "/bin/bash", 1, NULL);
+    register_tool(tm, "zsh", "Z shell", "zsh", 1, NULL);
+    register_tool(tm, "fish", "Fish shell", "fish", 1, NULL);
 }
 
-
-/* ── tools_launcher_open / close ────────────────────────────── */
-
 void tools_launcher_open(ToolManager *tm) {
-    ToolLauncher *l = &tm->launcher;
-    l->visible       = 1;
-    l->selected      = 0;
-    l->scroll_offset = 0;    /* always start at top */
-    l->search[0]     = '\0';
-    l->search_len    = 0;
+    ToolLauncher *launcher = &tm->launcher;
+    launcher->visible = 1;
+    launcher->selected = 0;
+    launcher->scroll_offset = 0;
+    launcher->search[0] = '\0';
+    launcher->search_len = 0;
 }
 
 void tools_launcher_close(ToolManager *tm) {
     tm->launcher.visible = 0;
 }
 
-
-/* ── tools_launch ───────────────────────────────────────────── */
-
-void tools_launch(ToolDef *tool, void *tabmgr_ptr,
-                  int cols, int rows) {
+void tools_launch(ToolDef *tool, void *tabmgr_ptr, int cols, int rows) {
     TabManager *tm = (TabManager *)tabmgr_ptr;
-
     if (tabs_new(tm, cols, rows) != 0) {
-        fprintf(stderr, "tools_launch: failed to open tab\n");
         return;
     }
 
 #ifdef CTERM_LINUX
-    /* Give bash time to initialise before we type the command */
-    usleep(150000);   /* 150 ms */
+    usleep(140000);
+    Tab *tab = tabs_get_active(tm);
+    Pane *pane = pane_get_focused(tab->root);
+    if (!pane) {
+        return;
+    }
 
-    Tab  *tab = tabs_get_active(tm);
-    Pane *fp  = pane_get_focused(tab->root);
-    if (!fp) return;
-
-    /* Build: "command arg1 arg2\r" */
     char cmd[512] = {0};
     strncat(cmd, tool->command, sizeof(cmd) - 2);
     for (int i = 1; i < MAX_TOOL_ARGS && tool->args[i]; i++) {
-        strncat(cmd, " ",          sizeof(cmd) - strlen(cmd) - 1);
+        strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
         strncat(cmd, tool->args[i], sizeof(cmd) - strlen(cmd) - 1);
     }
     strncat(cmd, "\r", sizeof(cmd) - strlen(cmd) - 1);
+    pty_write(&pane->pty, cmd, (int)strlen(cmd));
 
-    pty_write(&fp->pty, cmd, (int)strlen(cmd));
-
-    /* Update tab title */
     tab = tabs_get_active(tm);
     snprintf(tab->title, sizeof(tab->title), "%s", tool->name);
-
-    printf("tools_launch: '%s'\n", tool->name);
-#else
-    (void)tool;
 #endif
 }
 
+static int contains_ci(const char *haystack, const char *needle) {
+    if (!needle || !needle[0]) {
+        return 1;
+    }
 
-/* ── Filtering ──────────────────────────────────────────────── */
-
-/* Case-insensitive substring search */
-static int istr_contains(const char *hay, const char *needle) {
-    if (!needle || needle[0] == '\0') return 1;
-    for (int i = 0; hay[i]; i++) {
+    for (int i = 0; haystack[i]; i++) {
         int ok = 1;
         for (int j = 0; needle[j] && ok; j++) {
-            char h = hay[i+j], n = needle[j];
-            if (h >= 'A' && h <= 'Z') h += 32;
-            if (n >= 'A' && n <= 'Z') n += 32;
-            if (h != n) ok = 0;
+            char h = haystack[i + j];
+            char n = needle[j];
+            if (h >= 'A' && h <= 'Z') {
+                h += 32;
+            }
+            if (n >= 'A' && n <= 'Z') {
+                n += 32;
+            }
+            if (h != n) {
+                ok = 0;
+            }
         }
-        if (ok && needle[0]) return 1;
+        if (ok) {
+            return 1;
+        }
     }
     return 0;
 }
 
-static int tool_matches(const ToolDef *t, const char *s) {
-    return istr_contains(t->name, s) || istr_contains(t->desc, s);
-}
-
-/* Fill out_indices[], return count of matches */
 static int get_filtered(ToolManager *tm, const char *search,
                         int *out, int max) {
-    int n = 0;
-    for (int i = 0; i < tm->count && n < max; i++)
-        if (tool_matches(&tm->tools[i], search))
-            out[n++] = i;
-    return n;
+    int count = 0;
+    for (int i = 0; i < tm->count && count < max; i++) {
+        if (contains_ci(tm->tools[i].name, search) ||
+            contains_ci(tm->tools[i].desc, search)) {
+            out[count++] = i;
+        }
+    }
+    return count;
 }
 
+static void ensure_visible(ToolLauncher *launcher, int count) {
+    if (count == 0) {
+        launcher->scroll_offset = 0;
+        return;
+    }
 
-/* ── Scroll helpers ─────────────────────────────────────────── */
+    if (launcher->selected < 0) {
+        launcher->selected = 0;
+    }
+    if (launcher->selected >= count) {
+        launcher->selected = count - 1;
+    }
+    if (launcher->selected < launcher->scroll_offset) {
+        launcher->scroll_offset = launcher->selected;
+    }
 
-/*
- * ensure_selection_visible — adjusts scroll_offset so that
- * l->selected is always within the visible window.
- *
- * Called after every selection change.
- */
-static void ensure_visible(ToolLauncher *l, int count) {
-    if (count == 0) { l->scroll_offset = 0; return; }
+    int bottom = launcher->scroll_offset + LAUNCHER_ROWS - 1;
+    if (launcher->selected > bottom) {
+        launcher->scroll_offset = launcher->selected - LAUNCHER_ROWS + 1;
+    }
 
-    /* Clamp selected to valid range */
-    if (l->selected < 0)      l->selected = 0;
-    if (l->selected >= count) l->selected = count - 1;
-
-    /* Scroll up if selected is above the visible window */
-    if (l->selected < l->scroll_offset)
-        l->scroll_offset = l->selected;
-
-    /* Scroll down if selected is below the visible window */
-    int bottom = l->scroll_offset + LAUNCHER_VISIBLE_ROWS - 1;
-    if (l->selected > bottom)
-        l->scroll_offset = l->selected - LAUNCHER_VISIBLE_ROWS + 1;
-
-    /* Clamp scroll_offset */
-    int max_offset = count - LAUNCHER_VISIBLE_ROWS;
-    if (max_offset < 0)        max_offset = 0;
-    if (l->scroll_offset < 0) l->scroll_offset = 0;
-    if (l->scroll_offset > max_offset) l->scroll_offset = max_offset;
+    int max_offset = count - LAUNCHER_ROWS;
+    if (max_offset < 0) {
+        max_offset = 0;
+    }
+    if (launcher->scroll_offset < 0) {
+        launcher->scroll_offset = 0;
+    }
+    if (launcher->scroll_offset > max_offset) {
+        launcher->scroll_offset = max_offset;
+    }
 }
-
-
-/* ── tools_launcher_handle_key ──────────────────────────────── */
 
 int tools_launcher_handle_key(ToolManager *tm, SDL_Keycode sym,
-                               SDL_Keymod mod, void *tabmgr_ptr,
-                               int cols, int rows) {
+                              SDL_Keymod mod, void *tabmgr_ptr,
+                              int cols, int rows) {
     (void)mod;
-    ToolLauncher *l = &tm->launcher;
-    if (!l->visible) return 0;
+
+    ToolLauncher *launcher = &tm->launcher;
+    if (!launcher->visible) {
+        return 0;
+    }
 
     int indices[MAX_TOOLS];
-    int count = get_filtered(tm, l->search, indices, MAX_TOOLS);
+    int count = get_filtered(tm, launcher->search, indices, MAX_TOOLS);
 
     switch (sym) {
-
         case SDLK_ESCAPE:
             tools_launcher_close(tm);
             return 1;
-
         case SDLK_RETURN:
-            if (count > 0 && l->selected < count) {
-                ToolDef *tool = &tm->tools[indices[l->selected]];
+            if (count > 0 && launcher->selected < count) {
+                ToolDef *tool = &tm->tools[indices[launcher->selected]];
                 tools_launcher_close(tm);
                 tools_launch(tool, tabmgr_ptr, cols, rows);
             }
             return 1;
-
         case SDLK_UP:
-            l->selected--;
-            ensure_visible(l, count);
+            launcher->selected--;
+            ensure_visible(launcher, count);
             return 1;
-
         case SDLK_DOWN:
-            l->selected++;
-            ensure_visible(l, count);
+            launcher->selected++;
+            ensure_visible(launcher, count);
             return 1;
-
         case SDLK_PAGEUP:
-            /* Jump one full page up */
-            l->selected      -= LAUNCHER_VISIBLE_ROWS;
-            l->scroll_offset -= LAUNCHER_VISIBLE_ROWS;
-            ensure_visible(l, count);
+            launcher->selected -= LAUNCHER_ROWS;
+            launcher->scroll_offset -= LAUNCHER_ROWS;
+            ensure_visible(launcher, count);
             return 1;
-
         case SDLK_PAGEDOWN:
-            /* Jump one full page down */
-            l->selected      += LAUNCHER_VISIBLE_ROWS;
-            l->scroll_offset += LAUNCHER_VISIBLE_ROWS;
-            ensure_visible(l, count);
+            launcher->selected += LAUNCHER_ROWS;
+            launcher->scroll_offset += LAUNCHER_ROWS;
+            ensure_visible(launcher, count);
             return 1;
-
         case SDLK_HOME:
-            l->selected      = 0;
-            l->scroll_offset = 0;
+            launcher->selected = 0;
+            launcher->scroll_offset = 0;
             return 1;
-
         case SDLK_END:
-            l->selected = (count > 0) ? count - 1 : 0;
-            ensure_visible(l, count);
+            launcher->selected = count > 0 ? count - 1 : 0;
+            ensure_visible(launcher, count);
             return 1;
-
         case SDLK_BACKSPACE:
-            if (l->search_len > 0) {
-                l->search[--l->search_len] = '\0';
-                l->selected      = 0;
-                l->scroll_offset = 0;
+            if (launcher->search_len > 0) {
+                launcher->search[--launcher->search_len] = '\0';
+                launcher->selected = 0;
+                launcher->scroll_offset = 0;
             }
             return 1;
-
         default:
-            return 1;   /* consume all keys while open */
+            return 1;
     }
 }
-
-
-/* ── tools_launcher_handle_text ─────────────────────────────── */
 
 void tools_launcher_handle_text(ToolManager *tm, const char *text) {
-    ToolLauncher *l = &tm->launcher;
-    if (!l->visible) return;
+    ToolLauncher *launcher = &tm->launcher;
+    if (!launcher->visible) {
+        return;
+    }
 
     int len = (int)strlen(text);
-    if (len <= 0) return;
+    if (len <= 0) {
+        return;
+    }
 
-    if (l->search_len + len < (int)sizeof(l->search) - 1) {
-        strncat(l->search, text,
-                sizeof(l->search) - (size_t)l->search_len - 1);
-        l->search_len   += len;
-        l->selected      = 0;   /* reset to top on new char */
-        l->scroll_offset = 0;
+    if (launcher->search_len + len < (int)sizeof(launcher->search) - 1) {
+        strncat(launcher->search, text,
+                sizeof(launcher->search) - (size_t)launcher->search_len - 1);
+        launcher->search_len += len;
+        launcher->selected = 0;
+        launcher->scroll_offset = 0;
     }
 }
-
-
-/* ── tools_launcher_draw ────────────────────────────────────── */
 
 void tools_launcher_draw(ToolManager *tm, SDL_Renderer *renderer,
                          void *font_ptr, int win_w, int win_h) {
-    ToolLauncher *l = &tm->launcher;
-    if (!l->visible) return;
+    ToolLauncher *launcher = &tm->launcher;
+    if (!launcher->visible) {
+        return;
+    }
 
     Font *font = (Font *)font_ptr;
-
-    /* Build filtered list */
     int indices[MAX_TOOLS];
-    int count = get_filtered(tm, l->search, indices, MAX_TOOLS);
+    int count = get_filtered(tm, launcher->search, indices, MAX_TOOLS);
+    ensure_visible(launcher, count);
 
-    /* Sync scroll after any filter change */
-    ensure_visible(l, count);
+    int cw = font->cell_width > 0 ? font->cell_width : 8;
+    int ch = font->cell_height > 0 ? font->cell_height : 16;
 
-    /* ── Layout ── */
-    int overlay_w   = 580;
-    int row_h       = font->cell_height + 8;
-    int search_h    = font->cell_height + 14;
-    int footer_h    = font->cell_height + 10;
+    int header_h = ch + 8;
+    int row_h = ch + 6;
+    int visible = count < LAUNCHER_ROWS ? count : LAUNCHER_ROWS;
+    if (visible < 2) {
+        visible = 2;
+    }
+    int list_h = visible * row_h + 4;
+    int panel_h = ch * 3 + 20;
+    int footer_h = ch + 8;
+    int overlay_h = header_h + 1 + list_h + 1 + panel_h + 1 + footer_h;
 
-    /* How many rows actually visible (min of LAUNCHER_VISIBLE_ROWS
-       and how many results exist) */
-    int visible     = count < LAUNCHER_VISIBLE_ROWS
-                      ? count : LAUNCHER_VISIBLE_ROWS;
-    if (visible < 1) visible = 1;   /* always show at least 1 row */
-
-    int list_h      = visible * row_h;
-    int overlay_h   = search_h + 4 + list_h + footer_h + 6;
+    int overlay_w = (win_w * 70) / 100;
+    if (overlay_w > 680) {
+        overlay_w = 680;
+    }
+    if (overlay_w < 380) {
+        overlay_w = 380;
+    }
 
     int ox = (win_w - overlay_w) / 2;
     int oy = (win_h - overlay_h) / 4;
-    if (ox < 8) ox = 8;
-    if (oy < 8) oy = 8;
+    if (oy < 20) {
+        oy = 20;
+    }
 
-    /* ── 1. Full-window backdrop ── */
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 165);
+    set_color(renderer, 0, 0, 0, 180);
     SDL_Rect backdrop = {0, 0, win_w, win_h};
     SDL_RenderFillRect(renderer, &backdrop);
 
-    /* ── 2. Panel background ── */
-    SDL_SetRenderDrawColor(renderer, 24, 24, 30, 255);
+    set_color(renderer, RT_BORDER_R, RT_BORDER_G, RT_BORDER_B, 255);
+    SDL_Rect border_outer = {ox - 2, oy - 2, overlay_w + 4, overlay_h + 4};
+    SDL_RenderDrawRect(renderer, &border_outer);
+    set_color(renderer, RT_DIM_R, RT_DIM_G, RT_DIM_B, 180);
+    SDL_Rect border_inner = {ox - 1, oy - 1, overlay_w + 2, overlay_h + 2};
+    SDL_RenderDrawRect(renderer, &border_inner);
+
+    set_color(renderer, RT_BG_R, RT_BG_G, RT_BG_B, 255);
     SDL_Rect panel = {ox, oy, overlay_w, overlay_h};
     SDL_RenderFillRect(renderer, &panel);
 
-    /* ── 3. Panel border ── */
-    SDL_SetRenderDrawColor(renderer, 65, 125, 240, 255);
-    SDL_RenderDrawRect(renderer, &panel);
+    int y = oy;
 
-    /* ── 4. Search bar ── */
-    SDL_SetRenderDrawColor(renderer, 16, 16, 22, 255);
-    SDL_Rect sbar = {ox+2, oy+2, overlay_w-4, search_h-2};
-    SDL_RenderFillRect(renderer, &sbar);
+    set_color(renderer, RT_HEADER_R + 4, RT_HEADER_G + 8, RT_HEADER_B + 4, 255);
+    SDL_Rect header = {ox, y, overlay_w, header_h};
+    SDL_RenderFillRect(renderer, &header);
 
-    /* Prompt ">" */
-    int py = oy + (search_h - font->cell_height) / 2;
-    font_draw_char(font, renderer, '>', ox+10, py, 65, 135, 255);
+    font_draw_string(font, renderer, "SELECT TOOL",
+                     ox + 10, y + (header_h - ch) / 2,
+                     RT_ACCENT_R, RT_ACCENT_G, RT_ACCENT_B);
 
-    /* Search text or placeholder */
-    int tx = ox + 10 + font->cell_width + 6;
-    if (l->search_len > 0) {
-        font_draw_string(font, renderer, l->search,
-                         tx, py, 220, 220, 220);
-    } else {
-        font_draw_string(font, renderer, "type to search tools...",
-                         tx, py, 60, 60, 72);
-    }
+    char header_count[32];
+    snprintf(header_count, sizeof(header_count), "%d / %d", count, tm->count);
+    int header_x = ox + overlay_w - (int)strlen(header_count) * cw - 10;
+    font_draw_string(font, renderer, header_count,
+                     header_x, y + (header_h - ch) / 2,
+                     RT_DIM_R + 20, RT_DIM_G + 20, RT_DIM_B);
 
-    /* Blinking cursor in search bar */
-    if ((SDL_GetTicks() / 530) % 2 == 0) {
-        int cx = tx + l->search_len * font->cell_width;
-        SDL_SetRenderDrawColor(renderer, 80, 160, 255, 200);
-        SDL_Rect cur = {cx, py, 2, font->cell_height};
-        SDL_RenderFillRect(renderer, &cur);
-    }
+    y += header_h;
+    set_color(renderer, RT_BORDER_R, RT_BORDER_G, RT_BORDER_B, 255);
+    SDL_RenderDrawLine(renderer, ox, y, ox + overlay_w, y);
+    y++;
 
-    /* ── 5. Separator ── */
-    int sep_y = oy + search_h;
-    SDL_SetRenderDrawColor(renderer, 50, 60, 95, 255);
-    SDL_RenderDrawLine(renderer, ox+1, sep_y, ox+overlay_w-2, sep_y);
+    int list_top = y;
+    y += 2;
 
-    /* ── 6. Tool rows ── */
-    int list_y = sep_y + 4;
+    font_draw_string(font, renderer, "Name",
+                     ox + 10, y, RT_DIM_R, RT_DIM_G, RT_DIM_B);
+    font_draw_string(font, renderer, "Description",
+                     ox + 14 * cw, y, RT_DIM_R, RT_DIM_G, RT_DIM_B);
+    y += ch + 2;
 
-    /* No results */
+    set_color(renderer, RT_DIM_R, RT_DIM_G, RT_DIM_B, 120);
+    SDL_RenderDrawLine(renderer, ox + 4, y, ox + overlay_w - 4, y);
+    y += 2;
+
     if (count == 0) {
-        font_draw_string(font, renderer,
-                         "no tools match your search",
-                         ox + overlay_w/2 - 13*font->cell_width,
-                         list_y + 8, 80, 80, 95);
+        font_draw_string(font, renderer, "No tools match",
+                         ox + overlay_w / 2 - 7 * cw, y + 4,
+                         RT_DIM_R, RT_DIM_G, RT_DIM_B);
     }
 
-    /*
-     * Draw only the visible slice: rows [scroll_offset .. scroll_offset+visible)
-     */
     for (int vi = 0; vi < visible; vi++) {
-        int fi = l->scroll_offset + vi;   /* index in filtered list */
-        if (fi >= count) break;
-
-        int tool_idx = indices[fi];
-        ToolDef *tool = &tm->tools[tool_idx];
-        int row_y    = list_y + vi * row_h;
-        int is_sel   = (fi == l->selected);
-
-        /* Row highlight */
-        if (is_sel) {
-            SDL_SetRenderDrawColor(renderer, 38, 68, 128, 255);
-            SDL_Rect sel_bg = {ox+2, row_y, overlay_w-4, row_h};
-            SDL_RenderFillRect(renderer, &sel_bg);
-
-            /* Left accent bar */
-            SDL_SetRenderDrawColor(renderer, 80, 160, 255, 255);
-            SDL_Rect accent = {ox+2, row_y, 3, row_h};
-            SDL_RenderFillRect(renderer, &accent);
+        int fi = launcher->scroll_offset + vi;
+        if (fi >= count) {
+            break;
         }
 
-        /* Row index number (helps user know position) */
-        char num[8];
-        snprintf(num, sizeof(num), "%2d", fi + 1);
-        font_draw_string(font, renderer, num,
-                         ox + 8, row_y + 4,
-                         50, 60, 80);
+        ToolDef *tool = &tm->tools[indices[fi]];
+        int row_y = y + vi * row_h;
+        int is_selected = (fi == launcher->selected);
 
-        /* Tool name */
-        Uint8 nr = is_sel ? 100 : 80;
-        Uint8 ng = is_sel ? 200 : 160;
-        Uint8 nb = is_sel ? 255 : 215;
+        if (is_selected) {
+            set_color(renderer, RT_SEL_BG_R, RT_SEL_BG_G, RT_SEL_BG_B, 255);
+            SDL_Rect selected_bg = {ox + 1, row_y, overlay_w - 2, row_h - 1};
+            SDL_RenderFillRect(renderer, &selected_bg);
+        } else if (vi % 2 == 0) {
+            set_color(renderer, RT_BG_R + 2, RT_BG_G + 4, RT_BG_B + 2, 255);
+            SDL_Rect alt_bg = {ox + 1, row_y, overlay_w - 2, row_h - 1};
+            SDL_RenderFillRect(renderer, &alt_bg);
+        }
+
+        Uint8 name_r = is_selected ? RT_SEL_FG_R : RT_TEXT_R;
+        Uint8 name_g = is_selected ? RT_SEL_FG_G : RT_TEXT_G;
+        Uint8 name_b = is_selected ? RT_SEL_FG_B : RT_TEXT_B;
         font_draw_string(font, renderer, tool->name,
-                         ox + 8 + 3*font->cell_width, row_y + 4,
-                         nr, ng, nb);
+                         ox + 10, row_y + (row_h - ch) / 2,
+                         name_r, name_g, name_b);
 
-        /* Description — offset past fixed name column (12 chars) */
-        int desc_x = ox + 8 + 3*font->cell_width
-                     + 12*font->cell_width;
+        int desc_x = ox + 14 * cw;
+        int available = (overlay_w - (desc_x - ox) - 14) / cw;
+        if (available > 0) {
+            char desc[80] = {0};
+            int desc_len = (int)strlen(tool->desc);
+            strncpy(desc, tool->desc,
+                    desc_len < available ? (size_t)desc_len : (size_t)available);
+            if (desc_len > available && available > 3) {
+                desc[available - 3] = '.';
+                desc[available - 2] = '.';
+                desc[available - 1] = '.';
+                desc[available] = '\0';
+            }
 
-        /* Available width for description */
-        int avail_chars = (overlay_w - (desc_x - ox) - 20)
-                          / font->cell_width;
-        if (avail_chars < 1) avail_chars = 1;
-
-        char desc[128] = {0};
-        strncpy(desc, tool->desc,
-                (size_t)avail_chars < sizeof(desc)-1
-                ? (size_t)avail_chars : sizeof(desc)-1);
-        if ((int)strlen(tool->desc) > avail_chars && avail_chars > 3) {
-            desc[avail_chars-3] = '.';
-            desc[avail_chars-2] = '.';
-            desc[avail_chars-1] = '.';
-            desc[avail_chars]   = '\0';
+            Uint8 desc_r = is_selected ? RT_SEL_FG_R : RT_DIM_R + 30;
+            Uint8 desc_g = is_selected ? RT_SEL_FG_G : RT_DIM_G + 30;
+            Uint8 desc_b = is_selected ? RT_SEL_FG_B : RT_DIM_B;
+            font_draw_string(font, renderer, desc,
+                             desc_x, row_y + (row_h - ch) / 2,
+                             desc_r, desc_g, desc_b);
         }
 
-        Uint8 dr = is_sel ? 165 : 105;
-        Uint8 dg = is_sel ? 165 : 105;
-        Uint8 db = is_sel ? 165 : 105;
-        font_draw_string(font, renderer, desc,
-                         desc_x, row_y + 4, dr, dg, db);
-
-        /* Subtle row divider */
-        if (vi < visible - 1 && !is_sel) {
-            SDL_SetRenderDrawColor(renderer, 35, 35, 45, 255);
+        if (!is_selected && vi < visible - 1) {
+            set_color(renderer, RT_BG_R + 8, RT_BG_G + 14, RT_BG_B + 8, 255);
             SDL_RenderDrawLine(renderer,
-                               ox+8, row_y+row_h-1,
-                               ox+overlay_w-8, row_y+row_h-1);
+                               ox + 4, row_y + row_h - 1,
+                               ox + overlay_w - 4, row_y + row_h - 1);
         }
     }
 
-    /* ── 7. Scroll indicator bar ── */
-    /*
-     * Drawn on the right edge of the list area.
-     * Shows proportional position in the full filtered list.
-     * Only drawn when there are more items than visible rows.
-     */
-    if (count > LAUNCHER_VISIBLE_ROWS) {
-        int bar_track_h = list_h;
-        int bar_track_y = list_y;
+    y = list_top + list_h;
 
-        /* Track background */
-        SDL_SetRenderDrawColor(renderer, 30, 30, 40, 255);
-        SDL_Rect track = {ox+overlay_w-8, bar_track_y, 6, bar_track_h};
+    if (count > LAUNCHER_ROWS) {
+        int track_y = list_top + ch + 6;
+        int track_h = visible * row_h;
+        set_color(renderer, RT_DIM_R, RT_DIM_G, RT_DIM_B, 80);
+        SDL_Rect track = {ox + overlay_w - 5, track_y, 3, track_h};
         SDL_RenderFillRect(renderer, &track);
 
-        /* Thumb size proportional to visible/total ratio */
-        float ratio    = (float)LAUNCHER_VISIBLE_ROWS / (float)count;
-        int   thumb_h  = (int)(bar_track_h * ratio);
-        if (thumb_h < 12) thumb_h = 12;
+        float ratio = (float)LAUNCHER_ROWS / (float)count;
+        int thumb_h = (int)(track_h * ratio);
+        if (thumb_h < 8) {
+            thumb_h = 8;
+        }
+        float progress = (float)launcher->scroll_offset
+                       / (float)(count - LAUNCHER_ROWS);
+        int thumb_y = track_y + (int)((track_h - thumb_h) * progress);
 
-        /* Thumb position proportional to scroll_offset */
-        float pos_ratio = (float)l->scroll_offset
-                          / (float)(count - LAUNCHER_VISIBLE_ROWS);
-        int   thumb_y   = bar_track_y
-                          + (int)((bar_track_h - thumb_h) * pos_ratio);
-
-        SDL_SetRenderDrawColor(renderer, 70, 130, 240, 200);
-        SDL_Rect thumb = {ox+overlay_w-8, thumb_y, 6, thumb_h};
+        set_color(renderer, RT_SEL_BG_R, RT_SEL_BG_G, RT_SEL_BG_B, 200);
+        SDL_Rect thumb = {ox + overlay_w - 5, thumb_y, 3, thumb_h};
         SDL_RenderFillRect(renderer, &thumb);
     }
 
-    /* ── 8. Footer separator ── */
-    int fsep_y = list_y + list_h + 2;
-    SDL_SetRenderDrawColor(renderer, 42, 48, 72, 255);
-    SDL_RenderDrawLine(renderer, ox+1, fsep_y, ox+overlay_w-2, fsep_y);
+    set_color(renderer, RT_BORDER_R, RT_BORDER_G, RT_BORDER_B, 255);
+    SDL_RenderDrawLine(renderer, ox, y, ox + overlay_w, y);
+    y++;
 
-    /* ── 9. Footer hints ── */
-    int fy = fsep_y + (footer_h - font->cell_height) / 2;
+    set_color(renderer, RT_PANEL_R, RT_PANEL_G, RT_PANEL_B, 255);
+    SDL_Rect status = {ox, y, overlay_w, panel_h};
+    SDL_RenderFillRect(renderer, &status);
 
-    font_draw_string(font, renderer, "Enter=launch",
-                     ox+10, fy, 55, 110, 190);
-    font_draw_string(font, renderer, "Esc=close",
-                     ox+10+13*font->cell_width, fy, 55, 110, 190);
-    font_draw_string(font, renderer, "PgUp/Dn=page",
-                     ox+10+23*font->cell_width, fy, 55, 110, 190);
+    int py = y + 6;
+    int label_x = ox + 10;
+    int value_x = ox + 10 * cw;
 
-    /* Result count — right aligned */
-    char cstr[32];
-    snprintf(cstr, sizeof(cstr), "%d/%d tools",
-             count, tm->count);
-    int cw = (int)strlen(cstr) * font->cell_width;
-    font_draw_string(font, renderer, cstr,
-                     ox+overlay_w-cw-10, fy, 50, 60, 80);
+    if (count > 0 && launcher->selected < count) {
+        ToolDef *selected = &tm->tools[indices[launcher->selected]];
+
+        font_draw_string(font, renderer, "Name",
+                         label_x, py, RT_DIM_R + 20, RT_DIM_G + 20, RT_DIM_B);
+        font_draw_string(font, renderer, selected->name,
+                         value_x, py, RT_TEXT_R, RT_TEXT_G, RT_TEXT_B);
+        py += ch + 4;
+
+        font_draw_string(font, renderer, "Desc",
+                         label_x, py, RT_DIM_R + 20, RT_DIM_G + 20, RT_DIM_B);
+        int short_available = (overlay_w - (value_x - ox) - 14) / cw;
+        char short_desc[64] = {0};
+        strncpy(short_desc, selected->desc,
+                short_available < 63 ? (size_t)short_available : 63);
+        font_draw_string(font, renderer, short_desc,
+                         value_x, py, RT_DIM_R + 50, RT_DIM_G + 50, RT_DIM_B);
+        py += ch + 6;
+    } else {
+        py += (ch + 4) * 2 + 6;
+    }
+
+    font_draw_string(font, renderer, "Search",
+                     label_x, py, RT_DIM_R + 20, RT_DIM_G + 20, RT_DIM_B);
+
+    int box_x = value_x - 4;
+    int box_w = overlay_w - (value_x - ox) - 14;
+    int box_h = ch + 6;
+    set_color(renderer, RT_INPUT_BG_R, RT_INPUT_BG_G, RT_INPUT_BG_B, 255);
+    SDL_Rect input = {box_x, py - 2, box_w, box_h};
+    SDL_RenderFillRect(renderer, &input);
+    set_color(renderer, RT_BORDER_R, RT_BORDER_G, RT_BORDER_B, 255);
+    SDL_RenderDrawRect(renderer, &input);
+
+    if (launcher->search_len > 0) {
+        font_draw_string(font, renderer, launcher->search,
+                         box_x + 4, py, RT_TEXT_R, RT_TEXT_G, RT_TEXT_B);
+    } else {
+        font_draw_string(font, renderer, "type to filter...",
+                         box_x + 4, py, RT_DIM_R, RT_DIM_G, RT_DIM_B);
+    }
+
+    if ((SDL_GetTicks() / 530) % 2 == 0) {
+        int cursor_x = box_x + 4 + launcher->search_len * cw;
+        set_color(renderer, RT_CURSOR_R, RT_CURSOR_G, RT_CURSOR_B, 220);
+        SDL_Rect cursor = {cursor_x, py, 2, ch};
+        SDL_RenderFillRect(renderer, &cursor);
+    }
+
+    y += panel_h;
+    set_color(renderer, RT_BORDER_R, RT_BORDER_G, RT_BORDER_B, 255);
+    SDL_RenderDrawLine(renderer, ox, y, ox + overlay_w, y);
+    y++;
+
+    set_color(renderer, RT_HEADER_R + 4, RT_HEADER_G + 8, RT_HEADER_B + 4, 255);
+    SDL_Rect footer = {ox, y, overlay_w, footer_h};
+    SDL_RenderFillRect(renderer, &footer);
+
+    int footer_y = y + (footer_h - ch) / 2;
+    font_draw_string(font, renderer, "Enter=Launch",
+                     ox + 10, footer_y, RT_DIM_R + 30, RT_DIM_G + 30, RT_DIM_B);
+    font_draw_string(font, renderer, "Esc=Close",
+                     ox + 10 + 13 * cw, footer_y,
+                     RT_DIM_R + 30, RT_DIM_G + 30, RT_DIM_B);
+    font_draw_string(font, renderer, "PgDn=Scroll",
+                     ox + 10 + 23 * cw, footer_y,
+                     RT_DIM_R + 30, RT_DIM_G + 30, RT_DIM_B);
+
+    char count_text[24];
+    snprintf(count_text, sizeof(count_text), "%d tools", count);
+    int count_x = ox + overlay_w - (int)strlen(count_text) * cw - 10;
+    font_draw_string(font, renderer, count_text, count_x, footer_y,
+                     RT_DIM_R, RT_DIM_G, RT_DIM_B);
+
+    set_color(renderer, RT_BORDER_R, RT_BORDER_G, RT_BORDER_B, 255);
+    SDL_RenderDrawLine(renderer, ox, oy + overlay_h - 1,
+                       ox + overlay_w, oy + overlay_h - 1);
 }
