@@ -600,7 +600,7 @@ int main(void) {
                     int n=pty_read(&p->pty,read_buf,sizeof(read_buf));
                     if(n>0) {
                         terminal_process(p->term,read_buf,n);
-                        if(i!=tm.active) t->has_activity=1;
+                        tabs_note_activity(&tm, i);
                     }
                 } else {
                     if(p->second) stk[sp++]=p->second;

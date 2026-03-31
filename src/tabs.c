@@ -96,6 +96,14 @@ void tabs_set_active(TabManager *tm, int i) {
     }
 }
 
+void tabs_note_activity(TabManager *tm, int i) {
+    if (i < 0 || i >= tm->count || i == tm->active) {
+        return;
+    }
+
+    tm->tabs[i].has_activity = 1;
+}
+
 Tab *tabs_get_active(TabManager *tm) {
     return &tm->tabs[tm->active];
 }

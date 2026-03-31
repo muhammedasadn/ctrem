@@ -27,6 +27,7 @@ void tabs_close(TabManager *tm, int i);
 void tabs_next(TabManager *tm);
 void tabs_prev(TabManager *tm);
 void tabs_set_active(TabManager *tm, int i);
+void tabs_note_activity(TabManager *tm, int i);
 Tab *tabs_get_active(TabManager *tm);
 void tabs_draw_bar(TabManager *tm, SDL_Renderer *renderer,
                    void *font_ptr, int win_width);
