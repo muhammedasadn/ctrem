@@ -27,10 +27,12 @@
 #endif
 
 #include "font.h"
+#include "platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>  /* for access() */
+#include <limits.h>
 
 /* Helper function to try loading a font from a path */
 static int try_load_font(FT_Library library, FT_Face *face, 
@@ -46,6 +48,42 @@ static int try_load_font(FT_Library library, FT_Face *face,
         return 0;
     }
     return -1;
+}
+
+static int try_load_relative_to_exe(FT_Library library, FT_Face *face,
+                                    const char *path, int size) {
+    if (!path || path[0] == '\0' || path[0] == '/') {
+        return -1;
+    }
+
+#ifdef CTERM_LINUX
+    char exe_path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len <= 0 || len >= (ssize_t)sizeof(exe_path) - 1) {
+        return -1;
+    }
+    exe_path[len] = '\0';
+
+    char *slash = strrchr(exe_path, '/');
+    if (!slash) {
+        return -1;
+    }
+    *slash = '\0';
+
+    char resolved[PATH_MAX];
+    if (snprintf(resolved, sizeof(resolved), "%s/%s", exe_path, path)
+        >= (int)sizeof(resolved)) {
+        return -1;
+    }
+
+    return try_load_font(library, face, resolved, size);
+#else
+    (void)library;
+    (void)face;
+    (void)path;
+    (void)size;
+    return -1;
+#endif
 }
 
 
@@ -64,32 +102,44 @@ int font_init(Font *f, SDL_Renderer *renderer,
     }
 
     /* ── Step 2: Try to load font from multiple locations ── */
+    const char *env_font = getenv("CTERM_FONT");
     const char* font_paths[] = {
-        /* 1. Environment variable (for AppImage) */
-        getenv("CTERM_FONT"),
-        
-        /* 2. Config file path */
+        /* 1. Config file path */
         config_path,
         
-        /* 3. AppImage internal path */
+        /* 2. AppImage internal path */
         "/usr/share/cterm/font.ttf",
         
-        /* 4. Common system font locations */
+        /* 3. Common system font locations */
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
         "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
         "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
         "/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf",
         "/usr/share/fonts/truetype/fira-code/FiraCode-Regular.ttf",
+        "assets/font.ttf",
+        "../assets/font.ttf",
         
         NULL
     };
     
     int loaded = 0;
+    if (env_font && try_load_font(f->library, &f->face, env_font, size) == 0) {
+        loaded = 1;
+    }
+
     for (int i = 0; font_paths[i] != NULL; i++) {
-        if (font_paths[i] == NULL) continue;
-        
+        if (loaded) {
+            break;
+        }
+
         if (try_load_font(f->library, &f->face, font_paths[i], size) == 0) {
+            loaded = 1;
+            break;
+        }
+
+        if (try_load_relative_to_exe(f->library, &f->face,
+                                     font_paths[i], size) == 0) {
             loaded = 1;
             break;
         }
@@ -98,9 +148,11 @@ int font_init(Font *f, SDL_Renderer *renderer,
     if (!loaded) {
         fprintf(stderr, "font_init: Failed to load any font!\n");
         fprintf(stderr, "Tried paths:\n");
+        if (env_font) {
+            fprintf(stderr, "  - %s\n", env_font);
+        }
         for (int i = 0; font_paths[i] != NULL; i++) {
-            if (font_paths[i])
-                fprintf(stderr, "  - %s\n", font_paths[i]);
+            fprintf(stderr, "  - %s\n", font_paths[i]);
         }
         FT_Done_FreeType(f->library);
         return -1;
