@@ -48,17 +48,43 @@ static void clear_selection_state(Selection *sel, Pane **sel_pane) {
     }
 }
 
+static void normalize_selection_bounds(Selection *sel, int max_rows,
+                                       int max_cols, int *r1, int *c1,
+                                       int *r2, int *c2) {
+    *r1 = sel->start_row;
+    *c1 = sel->start_col;
+    *r2 = sel->end_row;
+    *c2 = sel->end_col;
+
+    if (*r1 > *r2 || (*r1 == *r2 && *c1 > *c2)) {
+        int temp = *r1;
+        *r1 = *r2;
+        *r2 = temp;
+        temp = *c1;
+        *c1 = *c2;
+        *c2 = temp;
+    }
+
+    if (*r1 < 0) {
+        *r1 = 0;
+    }
+    if (*r2 >= max_rows) {
+        *r2 = max_rows - 1;
+    }
+    if (*c1 < 0) {
+        *c1 = 0;
+    }
+    if (*c2 >= max_cols) {
+        *c2 = max_cols - 1;
+    }
+}
+
 static char *build_selection_text(Terminal *term, Selection *sel,
                                    int cw, int ch) {
     (void)cw; (void)ch;
     if (!sel->has_selection) return NULL;
-    int r1=sel->start_row, c1=sel->start_col;
-    int r2=sel->end_row,   c2=sel->end_col;
-    if (r1>r2||(r1==r2&&c1>c2)) {
-        int t; t=r1;r1=r2;r2=t; t=c1;c1=c2;c2=t;
-    }
-    if (r1<0) r1=0; if (r2>=term->rows) r2=term->rows-1;
-    if (c1<0) c1=0; if (c2>=term->cols) c2=term->cols-1;
+    int r1, c1, r2, c2;
+    normalize_selection_bounds(sel, term->rows, term->cols, &r1, &c1, &r2, &c2);
     char *buf = malloc((r2-r1+1)*(term->cols+2)+1);
     if (!buf) return NULL;
     int pos=0;
@@ -81,11 +107,8 @@ static char *build_selection_text(Terminal *term, Selection *sel,
 
 static int cell_in_selection(Selection *sel, int row, int col) {
     if (!sel->has_selection && !sel->active) return 0;
-    int r1=sel->start_row,c1=sel->start_col;
-    int r2=sel->end_row,  c2=sel->end_col;
-    if (r1>r2||(r1==r2&&c1>c2)) {
-        int t; t=r1;r1=r2;r2=t; t=c1;c1=c2;c2=t;
-    }
+    int r1, c1, r2, c2;
+    normalize_selection_bounds(sel, row + 1, col + 1, &r1, &c1, &r2, &c2);
     if (row<r1||row>r2) return 0;
     if (row==r1&&col<c1) return 0;
     if (row==r2&&col>c2) return 0;
@@ -162,7 +185,12 @@ static void render_pane_tree(Pane *p, SDL_Renderer *renderer,
 
     int pcols = r.w / font->cell_width;
     int prows = r.h / font->cell_height;
-    if (pcols<1) pcols=1; if (prows<1) prows=1;
+    if (pcols < 1) {
+        pcols = 1;
+    }
+    if (prows < 1) {
+        prows = 1;
+    }
     if (pcols!=term->cols||prows!=term->rows) {
         terminal_resize(term,pcols,prows);
         pty_resize(&p->pty,pcols,prows);
@@ -282,7 +310,12 @@ int main(void) {
 
     int cols=win.width/font.cell_width;
     int rows=(win.height-TAB_BAR_HEIGHT)/font.cell_height;
-    if (cols<1) cols=1; if (rows<1) rows=1;
+    if (cols < 1) {
+        cols = 1;
+    }
+    if (rows < 1) {
+        rows = 1;
+    }
 
     if (tabs_init(&tm,cols,rows)!=0)
         { font_destroy(&font); window_destroy(&win); return 1; }
@@ -310,7 +343,12 @@ int main(void) {
                 SDL_GetWindowSize(win.window,&win.width,&win.height);
                 cols=win.width/font.cell_width;
                 rows=(win.height-TAB_BAR_HEIGHT)/font.cell_height;
-                if(cols<1)cols=1; if(rows<1)rows=1;
+                if (cols < 1) {
+                    cols = 1;
+                }
+                if (rows < 1) {
+                    rows = 1;
+                }
                 continue;
             }
 
@@ -583,8 +621,12 @@ int main(void) {
         tabs_draw_bar(&tm,win.renderer,&font,win.width);
 
         tab=tabs_get_active(&tm);
-        SDL_Rect term_area={0,TAB_BAR_HEIGHT,
-                            win.width,win.height-TAB_BAR_HEIGHT};
+        SDL_Rect term_area = {
+            0,
+            TAB_BAR_HEIGHT,
+            win.width,
+            win.height - TAB_BAR_HEIGHT
+        };
         pane_layout(tab->root,term_area);
         render_pane_tree(tab->root,win.renderer,&font,&win.sel);
 
