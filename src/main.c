@@ -41,6 +41,13 @@ static void pixel_to_cell(int px, int py, SDL_Rect r,
     if (*row < 0) *row = 0;
 }
 
+static void clear_selection_state(Selection *sel, Pane **sel_pane) {
+    memset(sel, 0, sizeof(*sel));
+    if (sel_pane) {
+        *sel_pane = NULL;
+    }
+}
+
 static char *build_selection_text(Terminal *term, Selection *sel,
                                    int cw, int ch) {
     (void)cw; (void)ch;
@@ -315,11 +322,14 @@ int main(void) {
                         tools_launcher_close(&tools); continue;
                     }
                     if (my<TAB_BAR_HEIGHT) {
-                        if (tabs_handle_click(&tm,mx,my,cols,rows))
+                        if (tabs_handle_click(&tm,mx,my,cols,rows)) {
+                            clear_selection_state(&win.sel, &sel_pane);
                             tab=tabs_get_active(&tm);
+                        }
                     } else {
                         Pane *clicked=pane_find_at(tab->root,mx,my);
                         if (clicked) {
+                            clear_selection_state(&win.sel, &sel_pane);
                             pane_set_focus(tab->root,clicked);
                             sel_pane=clicked;
                             win.sel.active=1; win.sel.has_selection=0;
@@ -400,7 +410,7 @@ int main(void) {
                     Pane *fp=pane_get_focused(tab->root);
                     if(fp) {
                         fp->term->scroll_offset=0;
-                        win.sel.has_selection=0;
+                        clear_selection_state(&win.sel, &sel_pane);
                         pty_write(&fp->pty,ev.text.text,strlen(ev.text.text));
                     }
                 }
@@ -445,19 +455,34 @@ int main(void) {
                     continue;
                 }
                 if (ctrl&&!shift&&sym==SDLK_t) {
-                    tabs_new(&tm,cols,rows); tab=tabs_get_active(&tm); continue;
+                    tabs_new(&tm,cols,rows);
+                    clear_selection_state(&win.sel, &sel_pane);
+                    tab=tabs_get_active(&tm);
+                    continue;
                 }
                 if (ctrl&&!shift&&sym==SDLK_w) {
-                    tabs_close(&tm,tm.active); tab=tabs_get_active(&tm); continue;
+                    tabs_close(&tm,tm.active);
+                    clear_selection_state(&win.sel, &sel_pane);
+                    tab=tabs_get_active(&tm);
+                    continue;
                 }
                 if (ctrl&&!shift&&sym==SDLK_TAB) {
-                    tabs_next(&tm); tab=tabs_get_active(&tm); continue;
+                    tabs_next(&tm);
+                    clear_selection_state(&win.sel, &sel_pane);
+                    tab=tabs_get_active(&tm);
+                    continue;
                 }
                 if (ctrl&&shift&&sym==SDLK_TAB) {
-                    tabs_prev(&tm); tab=tabs_get_active(&tm); continue;
+                    tabs_prev(&tm);
+                    clear_selection_state(&win.sel, &sel_pane);
+                    tab=tabs_get_active(&tm);
+                    continue;
                 }
                 if (ctrl&&!shift&&sym>=SDLK_1&&sym<=SDLK_9) {
-                    tabs_set_active(&tm,sym-SDLK_1); tab=tabs_get_active(&tm); continue;
+                    tabs_set_active(&tm,sym-SDLK_1);
+                    clear_selection_state(&win.sel, &sel_pane);
+                    tab=tabs_get_active(&tm);
+                    continue;
                 }
                 if (ctrl&&!shift&&sym==SDLK_p) {
                     tools_launcher_open(&tools); continue;
@@ -466,21 +491,26 @@ int main(void) {
                     Pane *fp=pane_get_focused(tab->root);
                     if(fp) { Pane *nw=pane_split(fp,PANE_SPLIT_H,cols,rows);
                              if(nw!=fp) tab->root=nw; }
+                    clear_selection_state(&win.sel, &sel_pane);
                     continue;
                 }
                 if (ctrl&&shift&&sym==SDLK_DOWN) {
                     Pane *fp=pane_get_focused(tab->root);
                     if(fp) { Pane *nw=pane_split(fp,PANE_SPLIT_V,cols,rows);
                              if(nw!=fp) tab->root=nw; }
+                    clear_selection_state(&win.sel, &sel_pane);
                     continue;
                 }
                 if (ctrl&&shift&&sym==SDLK_w) {
                     tab->root=pane_close_focused(tab->root);
+                    clear_selection_state(&win.sel, &sel_pane);
                     if(!tab->root) { tabs_close(&tm,tm.active); tab=tabs_get_active(&tm); }
                     continue;
                 }
                 if (ctrl&&shift&&sym==SDLK_f) {
-                    pane_focus_next(tab->root); continue;
+                    pane_focus_next(tab->root);
+                    clear_selection_state(&win.sel, &sel_pane);
+                    continue;
                 }
                 if (ctrl&&sym>=SDLK_a&&sym<=SDLK_z) {
                     Pane *fp=pane_get_focused(tab->root);
@@ -493,7 +523,8 @@ int main(void) {
                     PTY *pty=&fp->pty; Terminal *tfp=fp->term;
                     switch(sym) {
                         case SDLK_RETURN:
-                            tfp->scroll_offset=0; win.sel.has_selection=0;
+                            tfp->scroll_offset=0;
+                            clear_selection_state(&win.sel, &sel_pane);
                             pty_write(pty,"\r",1); break;
                         case SDLK_BACKSPACE: pty_write(pty,"\x7f",1); break;
                         case SDLK_TAB:       pty_write(pty,"\t",1);   break;
