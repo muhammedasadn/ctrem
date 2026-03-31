@@ -5,6 +5,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+static SDL_Rect tabs_command_button_rect(int win_width) {
+    SDL_Rect rect = {
+        win_width - TAB_CMD_WIDTH - 6,
+        1,
+        TAB_CMD_WIDTH,
+        TAB_BAR_HEIGHT - 2
+    };
+    return rect;
+}
+
 static int open_tab(TabManager *tm, int i, int cols, int rows) {
     Tab *t = &tm->tabs[i];
 
@@ -111,6 +121,7 @@ Tab *tabs_get_active(TabManager *tm) {
 void tabs_draw_bar(TabManager *tm, SDL_Renderer *renderer,
                    void *font_ptr, int win_width) {
     Font *font = (Font *)font_ptr;
+    SDL_Rect cmd_rect = tabs_command_button_rect(win_width);
 
     SDL_SetRenderDrawColor(renderer, RT_HEADER_R, RT_HEADER_G, RT_HEADER_B, 255);
     SDL_Rect bar_bg = {0, 0, win_width, TAB_BAR_HEIGHT};
@@ -118,6 +129,9 @@ void tabs_draw_bar(TabManager *tm, SDL_Renderer *renderer,
 
     for (int i = 0; i < tm->count; i++) {
         int x = i * TAB_WIDTH;
+        if (x + TAB_WIDTH >= cmd_rect.x - 4) {
+            break;
+        }
         int is_active = (i == tm->active);
 
         SDL_SetRenderDrawColor(renderer,
@@ -163,13 +177,27 @@ void tabs_draw_bar(TabManager *tm, SDL_Renderer *renderer,
     if (plus_x + 40 <= win_width) {
         SDL_SetRenderDrawColor(renderer, RT_BG_R, RT_BG_G, RT_BG_B, 255);
         SDL_Rect plus_bg = {plus_x + 1, 1, 38, TAB_BAR_HEIGHT - 2};
-        SDL_RenderFillRect(renderer, &plus_bg);
+        if (plus_bg.x + plus_bg.w < cmd_rect.x - 4) {
+            SDL_RenderFillRect(renderer, &plus_bg);
+            SDL_SetRenderDrawColor(renderer,
+                                   RT_BORDER_R, RT_BORDER_G, RT_BORDER_B, 255);
+            SDL_RenderDrawRect(renderer, &plus_bg);
+            font_draw_char(font, renderer, '+', plus_x + 12,
+                           (TAB_BAR_HEIGHT - font->cell_height) / 2,
+                           RT_ACCENT_R, RT_ACCENT_G, RT_ACCENT_B);
+        }
+    }
+
+    if (cmd_rect.x > 0) {
+        SDL_SetRenderDrawColor(renderer, RT_BG_R, RT_BG_G, RT_BG_B, 255);
+        SDL_RenderFillRect(renderer, &cmd_rect);
         SDL_SetRenderDrawColor(renderer,
                                RT_BORDER_R, RT_BORDER_G, RT_BORDER_B, 255);
-        SDL_RenderDrawRect(renderer, &plus_bg);
-        font_draw_char(font, renderer, '+', plus_x + 12,
-                       (TAB_BAR_HEIGHT - font->cell_height) / 2,
-                       RT_ACCENT_R, RT_ACCENT_G, RT_ACCENT_B);
+        SDL_RenderDrawRect(renderer, &cmd_rect);
+        font_draw_string(font, renderer, "CMD",
+                         cmd_rect.x + 9,
+                         (TAB_BAR_HEIGHT - font->cell_height) / 2,
+                         RT_ACCENT_R, RT_ACCENT_G, RT_ACCENT_B);
     }
 
     SDL_SetRenderDrawColor(renderer, RT_BORDER_R, RT_BORDER_G, RT_BORDER_B, 255);
@@ -201,6 +229,17 @@ int tabs_handle_click(TabManager *tm, int mouse_x, int mouse_y,
         tabs_set_active(tm, i);
     }
 
+    return 1;
+}
+
+int tabs_command_button_hit(int mouse_x, int mouse_y, int win_width) {
+    SDL_Rect rect = tabs_command_button_rect(win_width);
+    if (mouse_y < rect.y || mouse_y >= rect.y + rect.h) {
+        return 0;
+    }
+    if (mouse_x < rect.x || mouse_x >= rect.x + rect.w) {
+        return 0;
+    }
     return 1;
 }
 

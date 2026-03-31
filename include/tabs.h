@@ -7,6 +7,7 @@
 #define MAX_TABS        16
 #define TAB_BAR_HEIGHT  30
 #define TAB_WIDTH       140
+#define TAB_CMD_WIDTH   60
 
 typedef struct {
     Pane *root;
@@ -33,6 +34,7 @@ void tabs_draw_bar(TabManager *tm, SDL_Renderer *renderer,
                    void *font_ptr, int win_width);
 int  tabs_handle_click(TabManager *tm, int mouse_x, int mouse_y,
                        int cols, int rows);
+int  tabs_command_button_hit(int mouse_x, int mouse_y, int win_width);
 void tabs_destroy(TabManager *tm);
 
 #endif

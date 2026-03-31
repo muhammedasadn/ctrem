@@ -196,8 +196,6 @@ static void render_pane_tree(Pane *p, SDL_Renderer *renderer,
         pty_resize(&p->pty,pcols,prows);
     }
 
-    int force = (term->scroll_offset > 0);
-
     for (int row=0; row<term->rows; row++) {
         Cell *dr = terminal_get_display_row(term, row);
         for (int col=0; col<term->cols; col++) {
@@ -205,7 +203,6 @@ static void render_pane_tree(Pane *p, SDL_Renderer *renderer,
             int y = r.y + row*font->cell_height;
             if (x+font->cell_width >r.x+r.w) continue;
             if (y+font->cell_height>r.y+r.h) continue;
-            if (!force && dr && !dr[col].dirty) continue;
 
             /*
              * Color strategy:
@@ -360,7 +357,10 @@ int main(void) {
                         tools_launcher_close(&tools); continue;
                     }
                     if (my<TAB_BAR_HEIGHT) {
-                        if (tabs_handle_click(&tm,mx,my,cols,rows)) {
+                        if (tabs_command_button_hit(mx, my, win.width)) {
+                            tools_launcher_open(&tools);
+                            clear_selection_state(&win.sel, &sel_pane);
+                        } else if (tabs_handle_click(&tm,mx,my,cols,rows)) {
                             clear_selection_state(&win.sel, &sel_pane);
                             tab=tabs_get_active(&tm);
                         }
@@ -522,7 +522,7 @@ int main(void) {
                     tab=tabs_get_active(&tm);
                     continue;
                 }
-                if (ctrl&&!shift&&sym==SDLK_p) {
+                if ((ctrl&&!shift&&sym==SDLK_p) || sym == SDLK_F1) {
                     tools_launcher_open(&tools); continue;
                 }
                 if (ctrl&&shift&&sym==SDLK_RIGHT) {
